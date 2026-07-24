@@ -51,3 +51,67 @@ def test_limit_is_respected():
     ]
     assert len(zepto_products_from_raw("milk", raw, limit=3,
                                        base_url="https://www.zeptonow.com")) == 3
+
+
+def test_single_price_yields_no_mrp():
+    """A card with exactly one price must have mrp set to None."""
+    raw = [
+        {
+            "text": "Mother Dairy Milk\n500 ml\n₹42\nOut of stock",
+            "href": "/pn/mother-dairy/pvid/def456",
+            "image": "https://cdn.zeptonow.com/md.png",
+            "addText": "Out of stock",
+        },
+    ]
+    products = zepto_products_from_raw("milk", raw, limit=5, base_url="https://www.zeptonow.com")
+    assert len(products) == 1
+    assert products[0].price == 42.0
+    assert products[0].mrp is None
+
+
+def test_later_smaller_price_is_not_mrp():
+    """A smaller later price must not be treated as MRP."""
+    raw = [
+        {
+            "text": "Amul Milk\n1 L\n₹75\n₹50\nAdd",
+            "href": "/pn/amul-milk/pvid/ghi789",
+            "image": "https://cdn.zeptonow.com/amul.png",
+            "addText": "Add",
+        },
+    ]
+    products = zepto_products_from_raw("milk", raw, limit=5, base_url="https://www.zeptonow.com")
+    assert len(products) == 1
+    assert products[0].price == 75.0
+    assert products[0].mrp is None
+
+
+def test_missing_add_button_text_reads_as_in_stock():
+    """A card with empty addText must yield in_stock=True."""
+    raw = [
+        {
+            "text": "Organic Milk\n1 L\n₹90\nAdd",
+            "href": "/pn/organic-milk/pvid/jkl012",
+            "image": "https://cdn.zeptonow.com/organic.png",
+            "addText": "",
+        },
+    ]
+    products = zepto_products_from_raw("milk", raw, limit=5, base_url="https://www.zeptonow.com")
+    assert len(products) == 1
+    assert products[0].in_stock is True
+
+
+def test_out_of_stock_phrases_are_detected():
+    """Each out-of-stock phrase ('Out of stock', 'Notify me', 'Sold out') must yield in_stock=False."""
+    phrases = ["Out of stock", "Notify me", "Sold out"]
+    for i, phrase in enumerate(phrases):
+        raw = [
+            {
+                "text": f"Milk {i}\n1 L\n₹{70 + i}\n{phrase}",
+                "href": f"/pn/milk-{i}/pvid/{i}",
+                "image": "",
+                "addText": phrase,
+            },
+        ]
+        products = zepto_products_from_raw("milk", raw, limit=5, base_url="https://www.zeptonow.com")
+        assert len(products) == 1, f"Failed for phrase: {phrase}"
+        assert products[0].in_stock is False, f"Failed for phrase: {phrase}"
