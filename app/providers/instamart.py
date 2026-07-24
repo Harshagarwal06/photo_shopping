@@ -188,9 +188,11 @@ def _fees_from_bill(bill: dict) -> list[FeeLine]:
     The live spike (tests/fixtures/instamart_cart.json) showed a real
     ``billBreakdown: {"lineItems": [...], "toPay": {...}}`` shape rather than a
     flat dict of named fee keys, but the recorded cart was empty so the shape of
-    a populated ``lineItems`` entry is unverified. This reads both a list of
-    {label, value} entries under "lineItems" and, defensively, flat named keys
-    (as the brief's assumed shape used), so either real shape is handled.
+    a populated ``lineItems`` entry is unverified. This reads a list of
+    {label, value} entries under "lineItems" first; only when that produces no
+    fee lines does it fall back to flat named keys (as the brief's assumed
+    shape used). The two are never combined, since a payload that happens to
+    carry both shapes for the same fees would otherwise be counted twice.
     """
     fees: list[FeeLine] = []
     line_items = bill.get("lineItems")
@@ -202,6 +204,8 @@ def _fees_from_bill(bill: dict) -> list[FeeLine]:
             amount = _number(_first(entry, ("value", "amount")))
             if label and amount not in (None, 0):
                 fees.append(FeeLine(label=label, amount=amount))
+    if fees:
+        return fees
     for key, label in FEE_LABELS.items():
         value = _number(bill.get(key))
         if value not in (None, 0):
@@ -219,10 +223,19 @@ def cart_summary_from_instamart(payload: dict) -> CartSummary:
     field names (spinId/name/quantity/price) and populated fee-line shapes are
     unverified; item extraction reuses the same SPIN_KEYS/NAME_KEYS already
     proven against real Instamart payloads elsewhere in this module.
+
+    ``estimated`` reflects what Instamart actually failed to report, not
+    whether the cart happens to have zero fees: it is True when no bill
+    breakdown was present at all, and/or when no total key was present so the
+    total had to be derived locally as subtotal + fees. A derived total always
+    reconciles against itself (CartSummary.reconciles compares the reported
+    total to computed_total), so treating it as verified would silently defeat
+    the reconciliation safety check documented on CartSummary.
     """
     cart = payload.get("cart", payload) or {}
     raw_items = cart.get("items", []) or []
     bill = _first(cart, ("bill", "billBreakdown"), {}) or {}
+    breakdown_absent = not bill
 
     lines: list[CartLine] = []
     for raw in raw_items:
@@ -247,9 +260,22 @@ def cart_summary_from_instamart(payload: dict) -> CartSummary:
 
     fees = _fees_from_bill(bill)
 
-    total = _number(_first(bill, ("grandTotal", "total", "payableAmount", "toPay")))
-    if total is None:
-        total = round(subtotal + sum(fee.amount for fee in fees), 2)
+    reported_total = _number(_first(bill, ("grandTotal", "total", "payableAmount", "toPay")))
+    total_was_reported = reported_total is not None
+    total = (
+        reported_total
+        if total_was_reported
+        else round(subtotal + sum(fee.amount for fee in fees), 2)
+    )
+
+    notes: list[str] = []
+    if breakdown_absent:
+        notes.append("Instamart did not report a fee breakdown.")
+    if not total_was_reported:
+        notes.append(
+            "Instamart did not report a total; the total shown was calculated "
+            "locally from the subtotal and fees."
+        )
 
     return CartSummary(
         provider="instamart",
@@ -258,8 +284,8 @@ def cart_summary_from_instamart(payload: dict) -> CartSummary:
         fees=fees,
         total=round(total, 2),
         delivery_eta_minutes=_integer(_first(cart, ("etaMinutes", "eta"), 0)) or None,
-        estimated=not fees,
-        raw_note="" if fees else "Instamart did not report a fee breakdown.",
+        estimated=bool(notes),
+        raw_note=" ".join(notes),
     )
 
 
