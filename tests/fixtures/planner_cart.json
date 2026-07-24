@@ -1,0 +1,26 @@
+{
+  "items": [
+    {
+      "search_term": "milk",
+      "context": "regular dairy milk",
+      "quantity": 2,
+      "unit": "l",
+      "raw_text": "doodh 2L",
+      "source": "photo"
+    },
+    {
+      "search_term": "paneer",
+      "context": "for paneer butter masala serving 4",
+      "quantity": 400,
+      "unit": "g",
+      "raw_text": "paneer butter masala for 4",
+      "source": "expanded from: paneer butter masala"
+    }
+  ],
+  "constraints": {
+    "cart_budget": 800,
+    "item_caps": {"milk": 130},
+    "preferences": ["cheapest dish soap"]
+  }
+}
+

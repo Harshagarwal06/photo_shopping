@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Photo Shopping</title>
+    <meta name="description" content="Turn a grocery photo or typed request into a ranked instant-grocery cart." />
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/app.js?v=multi-provider-1" defer></script>
+  </head>
+  <body>
+    <header class="nav-slab">
+      <a class="slab-mark" href="#request" aria-label="Photo Shopping home">
+        <span class="cart-mark" aria-hidden="true"><span></span></span>
+        <span class="brand-full">PHOTO SHOPPING</span>
+        <span class="brand-short" aria-hidden="true">SHOP</span>
+      </a>
+      <div class="nav-meta">
+        <span class="mode-badge" id="mode-badge">Checking setup…</span>
+        <label class="provider-picker" for="provider-select">
+          <span>Shop with</span>
+          <select id="provider-select" aria-label="Grocery provider">
+            <option value="blinkit">Blinkit</option>
+            <option value="instamart">Swiggy Instamart</option>
+          </select>
+        </label>
+        <label class="address-picker" id="address-picker" hidden>
+          <span>Delivery address</span>
+          <select id="address-select"></select>
+        </label>
+        <button class="btn btn--soft btn--compact" id="login-button" type="button">Connect Blinkit</button>
+      </div>
+    </header>
+
+    <main id="app-shell">
+      <section class="request-shell" id="request" aria-labelledby="request-title">
+        <div class="request-copy">
+          <h1 id="request-title">A grocery list, ready to question.</h1>
+          <p>
+            Add a handwritten photo, a typed request, or both. You’ll review every match,
+            quantity, and rupee before anything reaches your grocery cart.
+          </p>
+          <ul class="promise-list" aria-label="What the assistant handles">
+            <li>English, Hindi, and Hinglish</li>
+            <li>Dish-to-ingredient expansion</li>
+            <li>Budget and pack-size checks</li>
+          </ul>
+        </div>
+
+        <form class="request-form" id="request-form" novalidate>
+          <div class="field">
+            <label for="request-text">Grocery request</label>
+            <textarea
+              id="request-text"
+              name="text"
+              rows="5"
+              placeholder="paneer butter masala for 4, plus dish soap, under ₹800 total"
+              aria-describedby="request-help request-error"
+            ></textarea>
+            <p class="field-help" id="request-help">Include quantities, budget, or words like “cheapest” when they matter.</p>
+            <p class="field-error" id="request-error" role="alert" hidden></p>
+          </div>
+
+          <div class="upload-field">
+            <span class="field-label">List photo</span>
+            <label class="upload-box" for="request-image" id="upload-box">
+              <input id="request-image" name="image" type="file" accept="image/*" />
+              <svg class="line-icon" aria-hidden="true" viewBox="0 0 24 24">
+                <path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14v5h14v-5" />
+              </svg>
+              <span class="upload-copy"><strong>Choose a photo</strong><small>JPG, PNG, HEIC · up to 12 MB</small></span>
+              <span class="file-name" id="file-name">No photo selected</span>
+            </label>
+          </div>
+
+          <div class="form-actions">
+            <p>Nothing is added until you confirm the finished draft.</p>
+            <button class="btn btn--primary" id="draft-button" type="submit">
+              <span class="button-label">Build draft cart</span>
+              <span class="spinner" aria-hidden="true"></span>
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <section class="progress-band" id="progress" aria-labelledby="progress-title" hidden>
+        <div class="content-shell progress-layout">
+          <div>
+            <h2 id="progress-title">Working through the list</h2>
+            <p id="progress-message" aria-live="polite">Starting the planner…</p>
+          </div>
+          <ol class="stage-list" id="stage-list">
+            <li data-stage="planner"><span>1</span>Plan</li>
+            <li data-stage="retrieval"><span>2</span>Search</li>
+            <li data-stage="matcher"><span>3</span>Match</li>
+            <li data-stage="constraints"><span>4</span>Check</li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="review-shell" id="review" aria-labelledby="review-title" hidden>
+        <header class="review-head">
+          <div>
+            <h2 id="review-title">Best match selected</h2>
+            <p>One product per request, ranked by fit, value, delivery, and your previous orders.</p>
+          </div>
+          <div class="total-block" aria-live="polite">
+            <span>Draft total</span>
+            <strong id="draft-total">₹0</strong>
+            <small id="budget-status"></small>
+          </div>
+        </header>
+        <div class="cart-flags" id="cart-flags" role="status"></div>
+        <div class="review-groups" id="review-groups"></div>
+      </section>
+    </main>
+
+    <aside class="confirm-bar" id="confirm-bar" hidden>
+      <div>
+        <strong id="confirm-count">0 items selected</strong>
+        <span id="confirm-mode">Review first. Checkout remains outside this app.</span>
+      </div>
+      <button class="btn btn--primary" id="confirm-button" type="button">
+        <span class="button-label">Run safe test</span>
+        <span class="spinner" aria-hidden="true"></span>
+      </button>
+    </aside>
+
+    <footer class="foot-stmt">
+      <p class="foot-stmt__line">You make the final call on every item.</p>
+      <div class="foot-stmt__meta">
+        <span>Photo Shopping</span>
+        <span>Local tool · No automatic checkout</span>
+      </div>
+    </footer>
+
+    <dialog class="summary-dialog" id="summary-dialog" aria-labelledby="summary-title">
+      <div class="dialog-head">
+        <h2 id="summary-title">Safety test result</h2>
+        <button class="icon-button" id="close-summary" type="button" aria-label="Close summary">
+          <svg class="line-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg>
+        </button>
+      </div>
+      <p id="summary-copy"></p>
+      <ul class="summary-list" id="summary-list"></ul>
+      <button class="btn btn--soft" id="summary-done" type="button">Done</button>
+    </dialog>
+
+    <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
+  </body>
+</html>

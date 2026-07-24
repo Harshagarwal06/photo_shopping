@@ -1,0 +1,2 @@
+"""Photo Shopping application package."""
+

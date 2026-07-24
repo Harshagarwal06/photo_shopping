@@ -1,0 +1,11 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+browser_profile/
+.DS_Store
+
+
+# Subagent-driven-development scratch (ledger, briefs, review packages)
+.superpowers/
