@@ -55,6 +55,12 @@ The provider seam is further along than the previous spec describes:
   that **already includes `get_cart` and `update_cart`**.
 - `app/blinkit.py:160-195` implements Chromium `SingletonLock` handling keyed
   on the single `settings.browser_profile_dir`.
+- `enforce_constraints()` already accepts `provider_id` / `provider_name`, and
+  `DraftCart` already carries both fields — so a draft is already
+  provider-tagged.
+- `constraints.py` already provides measurement parsing and a 0.9 under-supply
+  threshold that the shortfall rule reuses.
+- Baseline: 38 tests pass (`.venv/bin/python -m pytest -q`).
 
 So the registry migration is done. What is missing is running the pipeline
 across the registry concurrently, reading carts, clearing carts, a Zepto
@@ -95,7 +101,7 @@ photo / text
 | Module | Purpose | LLM |
 |---|---|---|
 | `app/providers/zepto.py` | Third Playwright provider, mirrors `blinkit.py` | no |
-| `app/units.py` | Pack-size parsing and per-unit normalisation | no |
+| `app/units.py` | Per-unit price and fill ratio, reusing `constraints.parse_measurement` | no |
 | `app/compare.py` | Ranking, coverage tiers, winner selection | no |
 | `app/orchestrator.py` | Parallel fan-out of the pipeline across platforms | no |
 
@@ -167,20 +173,30 @@ one (visible error).
 
 ### Per-unit normalisation
 
-`app/units.py` parses free-text pack sizes — `"1 L"`, `"500 ml"`, `"1 kg"`,
-`"250 g"`, `"6 x 100 g"`, `"12 pieces"`, `"1 dozen"` — into
-`(magnitude, dimension)` where dimension is one of `volume_ml`, `mass_g`,
-`count`. Per-unit prices are comparable only within the same dimension.
+`app/constraints.py:15` **already** provides `parse_measurement(text)`,
+returning `(amount, unit)` normalised to `g`, `ml`, or `count`, plus
+`requested_measurement(item)` and `units_for_candidate(item, product)`.
+`app/units.py` reuses these rather than reimplementing them; it adds only
+the per-unit price layer on top:
 
-Unparseable input returns `None` and the item is marked *not price-comparable
-per unit*. It is never guessed.
+- `per_unit_price(product, units) -> tuple[float, str] | None` — price per
+  gram / millilitre / count, or `None` when the pack size is unparseable.
+- `fill_ratio(item, product, units) -> float | None` — delivered ÷ requested.
+
+Per-unit prices are comparable only within the same dimension. Unparseable
+input returns `None` and the item is marked *not price-comparable per unit*.
+It is never guessed.
 
 ### Shortfall folds into coverage
 
 If Zepto's cheaper total comes from supplying 500ml where 1L was requested,
 that is not a cheaper cart — it is a smaller one. A platform supplying less
-than `min_fill_ratio` (default 0.9) of an item's requested quantity counts
-that item as **partial**, not matched.
+than `min_fill_ratio` of an item's requested quantity counts that item as
+**partial**, not matched.
+
+The default is **0.9**, matching the existing under-supply threshold already
+used by `_quantity_flags` in `app/constraints.py:74`, so the comparison and
+the single-platform draft agree on what "short" means.
 
 This makes "cheaper because the packs are smaller" lose on the merits, rather
 than needing a caveat in the UI that nobody reads.
