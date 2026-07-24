@@ -165,6 +165,44 @@ class CartSummary(BaseModel):
         )
 
 
+class Substitution(BaseModel):
+    item: str
+    requested: str
+    supplied: str
+    reason: str
+    per_unit_delta: float | None = None
+
+
+class PlatformOutcome(BaseModel):
+    provider: str
+    display_name: str
+    status: Literal["ok", "not_connected", "unavailable", "failed"] = "ok"
+    error: str = ""
+    summary: CartSummary | None = None
+    matched_items: int = 0
+    partial_items: list[str] = Field(default_factory=list)
+    missing_items: list[str] = Field(default_factory=list)
+    substitutions: list[Substitution] = Field(default_factory=list)
+
+    @property
+    def coverage_tier(self) -> int:
+        """0 = full coverage, 1 = short packs, 2 = missing items. Lower wins."""
+        if self.missing_items:
+            return 2
+        if self.partial_items:
+            return 1
+        return 0
+
+
+class ComparisonReport(BaseModel):
+    id: str = Field(default_factory=lambda: uuid4().hex)
+    platforms: list[PlatformOutcome] = Field(default_factory=list)
+    winner: str | None = None
+    ranking: list[str] = Field(default_factory=list)
+    reasons: list[str] = Field(default_factory=list)
+    estimated: bool = False
+
+
 class ConfirmResponse(BaseModel):
     results: list[AddResult]
     succeeded: int
