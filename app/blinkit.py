@@ -16,7 +16,7 @@ from playwright.async_api import BrowserContext, Page, Playwright, async_playwri
 
 from .config import Settings
 from .demo import demo_search
-from .models import AddResult, Product
+from .models import AddResult, CartLine, CartSummary, FeeLine, Product
 
 
 class BlinkitError(RuntimeError):
@@ -136,6 +136,90 @@ def _products_from_raw(
             )
         )
     return products[:limit]
+
+
+BILL_TOTAL_LABELS = {"item total", "items total", "subtotal", "sub total", "mrp total"}
+GRAND_TOTAL_LABELS = {"grand total", "to pay", "total amount", "bill total"}
+ETA_MINUTES_RE = re.compile(r"(\d+)\s*min", re.IGNORECASE)
+SIGNED_PRICE_RE = re.compile(r"(-?)\s*₹\s*(-?[\d,]+(?:\.\d+)?)")
+QUANTITY_RE = re.compile(r"(\d+)\s*[x×]\s*₹", re.IGNORECASE)
+
+
+def _signed_price(text: str) -> float | None:
+    match = SIGNED_PRICE_RE.search(text)
+    if not match:
+        return None
+    value = float(match.group(2).replace(",", ""))
+    return -abs(value) if match.group(1) == "-" or value < 0 else value
+
+
+def _bill_pairs(bill_text: str) -> list[tuple[str, float]]:
+    """Pair each bill label with the price on the following line."""
+    lines = [line.strip() for line in bill_text.splitlines() if line.strip()]
+    pairs: list[tuple[str, float]] = []
+    for index, line in enumerate(lines):
+        if "₹" in line:
+            continue
+        following = lines[index + 1] if index + 1 < len(lines) else ""
+        amount = _signed_price(following)
+        if amount is not None:
+            pairs.append((line, amount))
+    return pairs
+
+
+def cart_summary_from_raw(raw: dict, *, provider: str) -> CartSummary:
+    """Convert scraped cart text into a CartSummary. Pure; unit-tested."""
+    lines: list[CartLine] = []
+    for entry in raw.get("lines", []) or []:
+        text = entry.get("text", "")
+        line_total = _signed_price(text.splitlines()[-1] if text.splitlines() else "")
+        if line_total is None:
+            continue
+        quantity_match = QUANTITY_RE.search(text)
+        quantity = int(quantity_match.group(1)) if quantity_match else 1
+        text_lines = [item.strip() for item in text.splitlines() if item.strip()]
+        name = next(
+            (item for item in text_lines if "₹" not in item and not PACK_RE.fullmatch(item)),
+            "",
+        )
+        handle = entry.get("handle") or name
+        lines.append(
+            CartLine(
+                product_id=hashlib.sha1(handle.encode("utf-8")).hexdigest()[:12],
+                name=name,
+                quantity=quantity,
+                unit_price=round(line_total / quantity, 2) if quantity else line_total,
+                line_total=line_total,
+            )
+        )
+
+    pairs = _bill_pairs(raw.get("billText", "") or "")
+    subtotal = next(
+        (amount for label, amount in pairs if label.casefold() in BILL_TOTAL_LABELS),
+        round(sum(line.line_total for line in lines), 2),
+    )
+    total = next(
+        (amount for label, amount in pairs if label.casefold() in GRAND_TOTAL_LABELS),
+        None,
+    )
+    fees = [
+        FeeLine(label=label, amount=amount)
+        for label, amount in pairs
+        if label.casefold() not in BILL_TOTAL_LABELS
+        and label.casefold() not in GRAND_TOTAL_LABELS
+    ]
+    if total is None:
+        total = round(subtotal + sum(fee.amount for fee in fees), 2)
+
+    eta_match = ETA_MINUTES_RE.search(raw.get("etaText", "") or "")
+    return CartSummary(
+        provider=provider,
+        lines=lines,
+        subtotal=round(subtotal, 2),
+        fees=fees,
+        total=round(total, 2),
+        delivery_eta_minutes=int(eta_match.group(1)) if eta_match else None,
+    )
 
 
 class BlinkitClient:
