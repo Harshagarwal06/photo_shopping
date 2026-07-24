@@ -1416,10 +1416,15 @@ def match_across_platforms(
             prompt=prompt,
             max_tokens=800,
         )
-        result = CrossPlatformMatch.model_validate(raw)
-    except (ModelBackendError, Exception) as exc:
-        if isinstance(exc, ModelBackendError) and not settings.local_vision_fallback:
+    except ModelBackendError:
+        if not settings.local_vision_fallback:
             raise
+        return _fallback_cross_match(item, candidates_by_provider)
+
+    try:
+        result = CrossPlatformMatch.model_validate(raw)
+    except ValidationError:
+        # A malformed shape is recoverable: fall back rather than fail the run.
         return _fallback_cross_match(item, candidates_by_provider)
 
     # Never trust the model's ids: drop any pick that is not a real in-stock candidate.
@@ -1448,7 +1453,7 @@ def _fallback_cross_match(
     return CrossPlatformMatch(picks=picks, equivalence_note=note)
 ```
 
-Import `CrossPlatformMatch` from `.models`. Note `_fallback_match` already returns `product_id=None, units_to_add=0` for an empty or fully out-of-stock candidate list (`app/matcher.py:112`), which satisfies the "no equivalent" tests.
+Import `CrossPlatformMatch` from `.models` and `ValidationError` from `pydantic`. Note `_fallback_match` already returns `product_id=None, units_to_add=0` for an empty or fully out-of-stock candidate list (`app/matcher.py:112`), which satisfies the "no equivalent" tests.
 
 - [ ] **Step 5: Run test to verify it passes**
 
@@ -1897,10 +1902,6 @@ def rank(outcomes: list[PlatformOutcome], settings: Settings) -> ComparisonRepor
                 f"{outcome.display_name} supplies short packs for: "
                 f"{', '.join(outcome.partial_items)}."
             )
-
-    for outcome in outcomes:
-        if outcome.status == "ok" and outcome.missing_items and not _rankable(outcome):
-            continue
 
     return ComparisonReport(
         platforms=outcomes,
