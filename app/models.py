@@ -132,7 +132,7 @@ class AddressSelectionRequest(BaseModel):
 
 
 class ProviderSelectionRequest(BaseModel):
-    provider_id: Literal["blinkit", "instamart"]
+    provider_id: Literal["blinkit", "instamart", "zepto"]
 
 
 class StreamEvent(BaseModel):
