@@ -103,13 +103,6 @@ async def run_comparison(
         draft = drafts[provider_id]
         try:
             if not settings.cart_mutations_allowed_for(provider_id):
-                # Writes are disallowed, but a read-only cart check still
-                # surfaces a genuinely broken platform (e.g. an expired
-                # session) rather than silently reporting an estimate for
-                # it. The real reading is discarded either way: reported
-                # totals here are always the deterministic estimate, never
-                # whatever happens to already be sitting in the live cart.
-                await provider.cart_summary()
                 return provider_id, estimated_summary(provider_id, draft), ""
             selections = [
                 (product, item.units_to_add)

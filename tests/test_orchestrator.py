@@ -15,6 +15,7 @@ class FakeProvider:
         self.eta = eta
         self.cleared = False
         self.added = []
+        self.cart_reads = 0
 
     async def search(self, query):
         if self.fail_on == "search":
@@ -27,6 +28,7 @@ class FakeProvider:
         return []
 
     async def cart_summary(self):
+        self.cart_reads += 1
         if self.fail_on == "cart":
             raise ProviderError(f"{self.provider_id} cart failed")
         subtotal = sum(p.price * q for p, q in self.added) or self.price
@@ -56,6 +58,18 @@ def _settings():
     return Settings(_env_file=None, safety_lock=True)
 
 
+def _write_settings():
+    # Writes permitted, matcher kept offline via model_backend="local".
+    return Settings(
+        _env_file=None,
+        safety_lock=False,
+        dry_run=False,
+        demo_mode=False,
+        zepto_cart_writes=True,
+        model_backend="local",
+    )
+
+
 def test_cheaper_platform_wins_across_providers():
     providers = {"blinkit": FakeProvider("blinkit", 75.0),
                  "zepto": FakeProvider("zepto", 68.0)}
@@ -76,8 +90,21 @@ def test_one_provider_failing_does_not_sink_the_run():
 def test_cart_read_failure_is_reported_as_failed():
     providers = {"blinkit": FakeProvider("blinkit", 75.0),
                  "zepto": FakeProvider("zepto", 68.0, fail_on="cart")}
-    report = asyncio.run(run_comparison(_plan(), providers, _settings()))
+    report = asyncio.run(run_comparison(_plan(), providers, _write_settings()))
     assert report.winner == "blinkit"
+    zepto = next(p for p in report.platforms if p.provider == "zepto")
+    assert zepto.status == "failed"
+    assert "cart failed" in zepto.error
+
+
+def test_write_permitted_adds_items_and_uses_real_summary():
+    """With writes permitted, add_items is actually called and totals are real."""
+    providers = {"blinkit": FakeProvider("blinkit", 75.0),
+                 "zepto": FakeProvider("zepto", 68.0)}
+    report = asyncio.run(run_comparison(_plan(), providers, _write_settings()))
+    assert providers["blinkit"].added != []
+    assert providers["zepto"].added != []
+    assert report.estimated is False
 
 
 def test_all_providers_failing_yields_no_winner():
@@ -103,3 +130,5 @@ def test_dry_run_produces_estimated_totals_without_writing():
     report = asyncio.run(run_comparison(_plan(), providers, _settings()))
     assert report.estimated is True
     assert providers["blinkit"].added == []
+    assert providers["blinkit"].cart_reads == 0
+    assert providers["zepto"].cart_reads == 0
