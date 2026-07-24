@@ -66,6 +66,13 @@ class MatchDecision(BaseModel):
     reason: str
 
 
+class CrossPlatformMatch(BaseModel):
+    """One planned item resolved against every platform at once."""
+
+    picks: dict[str, MatchDecision] = Field(default_factory=dict)
+    equivalence_note: str = ""
+
+
 class DraftItem(BaseModel):
     planned: PlannedItem
     candidates: list[Product] = Field(default_factory=list)

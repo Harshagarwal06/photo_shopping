@@ -3,10 +3,12 @@ from __future__ import annotations
 import math
 import re
 
+from pydantic import ValidationError
+
 from .config import Settings
 from .constraints import parse_measurement, requested_measurement, units_for_candidate
 from .llm import HFModelClient, ModelBackendError
-from .models import MatchDecision, PlannedItem, Product
+from .models import CrossPlatformMatch, MatchDecision, PlannedItem, Product
 
 
 MATCHER_SYSTEM = """You rank real Blinkit product candidates for one planned grocery item.
@@ -188,3 +190,86 @@ def match_product(
     if decision.product_id not in valid_ids:
         raise ModelBackendError("The matcher selected an unavailable or unknown product.")
     return decision
+
+
+CROSS_MATCHER_SYSTEM = """You match one planned grocery item against candidates from
+several Indian instant-delivery platforms at once. Prefer the SAME brand and pack size
+on every platform so their prices are comparable. Only choose in-stock candidate ids
+from that platform's own list. If a platform has no reasonable equivalent, set its
+product_id to null and units_to_add to 0 — do not force a poor match.
+Compute purchasable units, not loose quantity: 12 eggs is one 12-count tray.
+
+Schema: {"picks": {"<provider>": {"product_id": "id or null", "units_to_add": 1,
+"reason": "short reason"}}, "equivalence_note": "one short sentence"}
+"""
+
+
+def match_across_platforms(
+    item: PlannedItem,
+    candidates_by_provider: dict[str, list[Product]],
+    settings: Settings,
+) -> CrossPlatformMatch:
+    """Pick a comparable product on each platform, or report no equivalent."""
+    if not candidates_by_provider:
+        return CrossPlatformMatch()
+
+    if settings.demo_mode or settings.safety_lock or settings.model_backend == "local":
+        return _fallback_cross_match(item, candidates_by_provider)
+
+    payload = {
+        provider: [
+            {
+                "id": product.id, "name": product.name, "pack_size": product.pack_size,
+                "price": product.price, "in_stock": product.in_stock,
+            }
+            for product in candidates
+        ]
+        for provider, candidates in candidates_by_provider.items()
+    }
+    prompt = (
+        f"Planned item: {item.model_dump_json()}\n"
+        f"Candidates by platform: {payload}\n"
+        "Pick the most comparable product on each platform."
+    )
+    try:
+        raw = HFModelClient(settings).complete_json(
+            model=settings.matcher_model,
+            system=CROSS_MATCHER_SYSTEM,
+            prompt=prompt,
+            max_tokens=800,
+        )
+    except ModelBackendError:
+        if not settings.local_vision_fallback:
+            raise
+        return _fallback_cross_match(item, candidates_by_provider)
+
+    try:
+        result = CrossPlatformMatch.model_validate(raw)
+    except ValidationError:
+        # A malformed shape is recoverable: fall back rather than fail the run.
+        return _fallback_cross_match(item, candidates_by_provider)
+
+    # Never trust the model's ids: drop any pick that is not a real in-stock candidate.
+    for provider, candidates in candidates_by_provider.items():
+        valid = {p.id for p in candidates if p.in_stock}
+        decision = result.picks.get(provider)
+        if decision is None or decision.product_id not in valid:
+            result.picks[provider] = _fallback_match(item, candidates)
+    return result
+
+
+def _fallback_cross_match(
+    item: PlannedItem,
+    candidates_by_provider: dict[str, list[Product]],
+) -> CrossPlatformMatch:
+    picks = {
+        provider: _fallback_match(item, candidates)
+        for provider, candidates in candidates_by_provider.items()
+    }
+    missing = sorted(p for p, d in picks.items() if d.product_id is None)
+    note = (
+        f"No equivalent found on {', '.join(missing)}."
+        if missing
+        else "Matched independently on each platform."
+    )
+    return CrossPlatformMatch(picks=picks, equivalence_note=note)
