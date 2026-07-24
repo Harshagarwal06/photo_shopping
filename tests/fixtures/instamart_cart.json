@@ -1,0 +1,12 @@
+{
+  "cartTotalAmount": "0",
+  "items": [],
+  "billBreakdown": {
+    "lineItems": [],
+    "toPay": {
+      "label": "To Pay",
+      "value": "0"
+    }
+  },
+  "cartAbsent": true
+}

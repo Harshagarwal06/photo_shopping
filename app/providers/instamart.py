@@ -8,12 +8,15 @@ from typing import Any, Iterable
 from ..config import Settings
 from ..models import AddResult, Product
 from .base import (
+    CartLine,
     CartSummary,
     ConnectResult,
+    FeeLine,
     GroceryProvider,
     ProviderAddress,
     ProviderAuthError,
     ProviderError,
+    ProviderSafetyError,
     ProviderStatus,
 )
 from .instamart_oauth import SwiggyOAuthClient
@@ -165,6 +168,111 @@ def cart_items_from_instamart(payload: dict) -> dict[str, int]:
         if spin_id and quantity > 0:
             items[spin_id] = max(quantity, items.get(spin_id, 0))
     return items
+
+
+FEE_LABELS = {
+    "deliveryFee": "Delivery fee",
+    "handlingFee": "Handling fee",
+    "surgeFee": "Surge fee",
+    "rainFee": "Rain fee",
+    "smallCartFee": "Small cart fee",
+    "packagingFee": "Packaging fee",
+    "discount": "Discount",
+    "couponDiscount": "Coupon discount",
+}
+
+
+def _fees_from_bill(bill: dict) -> list[FeeLine]:
+    """Read fee lines out of a get_cart bill/billBreakdown dict.
+
+    The live spike (tests/fixtures/instamart_cart.json) showed a real
+    ``billBreakdown: {"lineItems": [...], "toPay": {...}}`` shape rather than a
+    flat dict of named fee keys, but the recorded cart was empty so the shape of
+    a populated ``lineItems`` entry is unverified. This reads both a list of
+    {label, value} entries under "lineItems" and, defensively, flat named keys
+    (as the brief's assumed shape used), so either real shape is handled.
+    """
+    fees: list[FeeLine] = []
+    line_items = bill.get("lineItems")
+    if isinstance(line_items, list):
+        for entry in line_items:
+            if not isinstance(entry, dict):
+                continue
+            label = str(_first(entry, ("label", "name", "title"), "") or "").strip()
+            amount = _number(_first(entry, ("value", "amount")))
+            if label and amount not in (None, 0):
+                fees.append(FeeLine(label=label, amount=amount))
+    for key, label in FEE_LABELS.items():
+        value = _number(bill.get(key))
+        if value not in (None, 0):
+            fees.append(FeeLine(label=label, amount=value))
+    return fees
+
+
+def cart_summary_from_instamart(payload: dict) -> CartSummary:
+    """Convert a get_cart payload into a CartSummary. Pure; unit-tested.
+
+    The real spike recording (tests/fixtures/instamart_cart.json) showed a flat
+    top-level shape (no "cart" wrapper key), with "items" at the top level and a
+    "billBreakdown" dict rather than "bill". The `cart = payload.get("cart",
+    payload)` fallback below handles both. The recorded cart was empty, so item
+    field names (spinId/name/quantity/price) and populated fee-line shapes are
+    unverified; item extraction reuses the same SPIN_KEYS/NAME_KEYS already
+    proven against real Instamart payloads elsewhere in this module.
+    """
+    cart = payload.get("cart", payload) or {}
+    raw_items = cart.get("items", []) or []
+    bill = _first(cart, ("bill", "billBreakdown"), {}) or {}
+
+    lines: list[CartLine] = []
+    for raw in raw_items:
+        quantity = _integer(_first(raw, ("quantity", "qty"), 0))
+        unit_price = _number(_first(raw, ("price", "unitPrice"))) or 0.0
+        line_total = _number(_first(raw, ("total", "lineTotal")))
+        lines.append(
+            CartLine(
+                product_id=str(
+                    _first(raw, (*SPIN_KEYS, "productId", "product_id", "id"), "") or ""
+                ),
+                name=str(_first(raw, NAME_KEYS, "") or "").strip(),
+                quantity=quantity,
+                unit_price=unit_price,
+                line_total=line_total if line_total is not None else unit_price * quantity,
+            )
+        )
+
+    subtotal = _number(_first(bill, ("itemTotal", "subTotal", "subtotal")))
+    if subtotal is None:
+        subtotal = round(sum(line.line_total for line in lines), 2)
+
+    fees = _fees_from_bill(bill)
+
+    total = _number(_first(bill, ("grandTotal", "total", "payableAmount", "toPay")))
+    if total is None:
+        total = round(subtotal + sum(fee.amount for fee in fees), 2)
+
+    return CartSummary(
+        provider="instamart",
+        lines=lines,
+        subtotal=round(subtotal, 2),
+        fees=fees,
+        total=round(total, 2),
+        delivery_eta_minutes=_integer(_first(cart, ("etaMinutes", "eta"), 0)) or None,
+        estimated=not fees,
+        raw_note="" if fees else "Instamart did not report a fee breakdown.",
+    )
+
+
+def zeroed_cart_update(payload: dict) -> list[dict]:
+    """Build the update_cart items body that empties the cart.
+
+    Reuses cart_items_from_instamart so spin-id extraction lives in exactly one
+    place and handles the same nested payload shapes add_items already handles.
+    """
+    return [
+        {"spinId": spin_id, "quantity": 0}
+        for spin_id in cart_items_from_instamart(payload)
+    ]
 
 
 def merge_cart_items(
@@ -460,7 +568,32 @@ class InstamartProvider(GroceryProvider):
         ]
 
     async def cart_summary(self) -> CartSummary:
-        raise ProviderError(f"{self.display_name} cart reading is not implemented yet.")
+        async with self._cart_lock:
+            payload = await self.transport.call_tool("get_cart")
+        return cart_summary_from_instamart(payload)
+
+    async def clear_cart(self, *, operation_id: str) -> None:
+        if not self.settings.cart_mutations_allowed_for(self.provider_id):
+            raise ProviderSafetyError(
+                "Instamart cart writes are disabled, so the cart was not cleared."
+            )
+        address_id = await self._ready_address_id()
+        async with self._cart_lock:
+            payload = await self.transport.call_tool("get_cart")
+            updates = zeroed_cart_update(payload)
+            if not updates:
+                return
+            await self.transport.call_tool(
+                "update_cart",
+                {"selectedAddressId": address_id, "items": updates},
+            )
+            remaining = cart_items_from_instamart(
+                await self.transport.call_tool("get_cart")
+            )
+            if remaining:
+                raise ProviderError(
+                    "Instamart still reports items after clearing; review the cart in Swiggy."
+                )
 
     async def close(self) -> None:
         return None
