@@ -249,12 +249,19 @@ def match_across_platforms(
         # A malformed shape is recoverable: fall back rather than fail the run.
         return _fallback_cross_match(item, candidates_by_provider)
 
-    # Never trust the model's ids: drop any pick that is not a real in-stock candidate.
+    # Never trust the model's ids or provider keys: rebuild picks from scratch,
+    # restricted strictly to the providers we actually asked about, and accept
+    # only ids that are real in-stock candidates on that same provider's list.
+    # This also drops any provider key the model invented that we never sent.
+    verified_picks: dict[str, MatchDecision] = {}
     for provider, candidates in candidates_by_provider.items():
         valid = {p.id for p in candidates if p.in_stock}
         decision = result.picks.get(provider)
-        if decision is None or decision.product_id not in valid:
-            result.picks[provider] = _fallback_match(item, candidates)
+        if decision is not None and decision.product_id in valid:
+            verified_picks[provider] = decision
+        else:
+            verified_picks[provider] = _fallback_match(item, candidates)
+    result.picks = verified_picks
     return result
 
 
