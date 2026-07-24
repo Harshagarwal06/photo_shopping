@@ -3,7 +3,7 @@ from __future__ import annotations
 from ..blinkit import BlinkitClient, BlinkitError
 from ..config import Settings
 from ..models import AddResult, Product
-from .base import ConnectResult, GroceryProvider, ProviderError, ProviderStatus
+from .base import CartSummary, ConnectResult, GroceryProvider, ProviderError, ProviderStatus
 
 
 class BlinkitProvider(GroceryProvider):
@@ -56,6 +56,9 @@ class BlinkitProvider(GroceryProvider):
         for product, quantity in selections:
             results.append(await self.client.add_to_cart(product, quantity))
         return results
+
+    async def cart_summary(self) -> CartSummary:
+        raise ProviderError(f"{self.display_name} cart reading is not implemented yet.")
 
     async def close(self) -> None:
         await self.client.close()

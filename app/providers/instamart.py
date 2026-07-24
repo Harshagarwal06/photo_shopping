@@ -8,6 +8,7 @@ from typing import Any, Iterable
 from ..config import Settings
 from ..models import AddResult, Product
 from .base import (
+    CartSummary,
     ConnectResult,
     GroceryProvider,
     ProviderAddress,
@@ -457,6 +458,9 @@ class InstamartProvider(GroceryProvider):
             )
             for product, quantity in selections
         ]
+
+    async def cart_summary(self) -> CartSummary:
+        raise ProviderError(f"{self.display_name} cart reading is not implemented yet.")
 
     async def close(self) -> None:
         return None
