@@ -76,6 +76,7 @@ def build_outcome(
     matched = 0
     partial: list[str] = []
     missing: list[str] = []
+    unverified: list[str] = []
     substitutions: list[Substitution] = []
 
     for item in draft.items:
@@ -87,7 +88,14 @@ def build_outcome(
             missing.append(label)
             continue
         ratio = fill_ratio(item.planned, product, item.units_to_add)
-        if ratio is not None and ratio < settings.min_fill_ratio:
+        if ratio is None:
+            # Pack size unparseable or units incomparable: never guess. The
+            # item is not demoted (that would punish a parsing gap, not a
+            # real shortfall) but it is disclosed so the user knows the
+            # quantity was never actually checked.
+            unverified.append(label)
+            matched += 1
+        elif ratio < settings.min_fill_ratio:
             partial.append(label)
             unit_price = per_unit_price(product, item.units_to_add)
             substitutions.append(
@@ -110,6 +118,7 @@ def build_outcome(
         matched_items=matched,
         partial_items=partial,
         missing_items=missing,
+        unverified_items=unverified,
         substitutions=substitutions,
     )
 
@@ -136,16 +145,20 @@ def rank(outcomes: list[PlatformOutcome], settings: Settings) -> ComparisonRepor
                 f"{outcome.summary.reconciliation_error}"
             )
 
+    is_estimated = any(
+        outcome.summary.estimated for outcome in outcomes if outcome.summary
+    )
+
     rankable = [outcome for outcome in outcomes if _rankable(outcome)]
     if not rankable:
         if not reasons:
             reasons.append("No platform produced a comparable cart.")
         return ComparisonReport(platforms=outcomes, winner=None, ranking=[],
-                                reasons=reasons, estimated=False)
+                                reasons=reasons, estimated=is_estimated)
 
     ordered = sorted(
         rankable,
-        key=lambda outcome: (outcome.coverage_tier, outcome.summary.total),
+        key=lambda outcome: (outcome.coverage_tier, round(outcome.summary.total, 2)),
     )
 
     # ETA tiebreak: within the price band, prefer the faster platform.
@@ -154,7 +167,8 @@ def rank(outcomes: list[PlatformOutcome], settings: Settings) -> ComparisonRepor
         outcome
         for outcome in ordered
         if outcome.coverage_tier == best.coverage_tier
-        and outcome.summary.total - best.summary.total <= settings.eta_tiebreak_rupees
+        and round(outcome.summary.total, 2) - round(best.summary.total, 2)
+        <= settings.eta_tiebreak_rupees
     ]
     if len(band) > 1:
         fastest = min(
@@ -192,13 +206,16 @@ def rank(outcomes: list[PlatformOutcome], settings: Settings) -> ComparisonRepor
                 f"{outcome.display_name} supplies short packs for: "
                 f"{', '.join(outcome.partial_items)}."
             )
+        if outcome.unverified_items:
+            reasons.append(
+                f"{outcome.display_name} could not verify the quantity for: "
+                f"{', '.join(outcome.unverified_items)}."
+            )
 
     return ComparisonReport(
         platforms=outcomes,
         winner=best.provider,
         ranking=[outcome.provider for outcome in ordered],
         reasons=reasons,
-        estimated=any(
-            outcome.summary.estimated for outcome in outcomes if outcome.summary
-        ),
+        estimated=is_estimated,
     )

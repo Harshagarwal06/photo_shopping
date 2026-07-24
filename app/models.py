@@ -182,6 +182,7 @@ class PlatformOutcome(BaseModel):
     matched_items: int = 0
     partial_items: list[str] = Field(default_factory=list)
     missing_items: list[str] = Field(default_factory=list)
+    unverified_items: list[str] = Field(default_factory=list)
     substitutions: list[Substitution] = Field(default_factory=list)
 
     @property
