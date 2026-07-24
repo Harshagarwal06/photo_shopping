@@ -168,7 +168,16 @@ def _bill_pairs(bill_text: str) -> list[tuple[str, float]]:
 
 
 def cart_summary_from_raw(raw: dict, *, provider: str) -> CartSummary:
-    """Convert scraped cart text into a CartSummary. Pure; unit-tested."""
+    """Convert scraped cart text into a CartSummary. Pure; unit-tested.
+
+    ``estimated`` reflects whether the platform actually reported a grand
+    total, not whether the cart happens to have zero fees: it is True when no
+    recognised grand-total label was found in the bill text, so the total had
+    to be derived locally as subtotal + fees. A derived total always
+    reconciles against itself (CartSummary.reconciles compares the reported
+    total to computed_total), so treating it as verified would silently
+    defeat the reconciliation safety check documented on CartSummary.
+    """
     lines: list[CartLine] = []
     for entry in raw.get("lines", []) or []:
         text = entry.get("text", "")
@@ -198,7 +207,7 @@ def cart_summary_from_raw(raw: dict, *, provider: str) -> CartSummary:
         (amount for label, amount in pairs if label.casefold() in BILL_TOTAL_LABELS),
         round(sum(line.line_total for line in lines), 2),
     )
-    total = next(
+    reported_total = next(
         (amount for label, amount in pairs if label.casefold() in GRAND_TOTAL_LABELS),
         None,
     )
@@ -208,8 +217,12 @@ def cart_summary_from_raw(raw: dict, *, provider: str) -> CartSummary:
         if label.casefold() not in BILL_TOTAL_LABELS
         and label.casefold() not in GRAND_TOTAL_LABELS
     ]
-    if total is None:
-        total = round(subtotal + sum(fee.amount for fee in fees), 2)
+    total_was_reported = reported_total is not None
+    total = (
+        reported_total
+        if total_was_reported
+        else round(subtotal + sum(fee.amount for fee in fees), 2)
+    )
 
     eta_match = ETA_MINUTES_RE.search(raw.get("etaText", "") or "")
     return CartSummary(
@@ -219,6 +232,15 @@ def cart_summary_from_raw(raw: dict, *, provider: str) -> CartSummary:
         fees=fees,
         total=round(total, 2),
         delivery_eta_minutes=int(eta_match.group(1)) if eta_match else None,
+        estimated=not total_was_reported,
+        raw_note=(
+            ""
+            if total_was_reported
+            else (
+                f"{provider} did not report a total; the total shown was "
+                "calculated locally from the subtotal and fees."
+            )
+        ),
     )
 
 

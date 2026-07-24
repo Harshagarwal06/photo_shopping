@@ -27,6 +27,7 @@ def test_parses_lines_and_bill_from_cart_text():
     assert summary.total == 160.0
     assert summary.delivery_eta_minutes == 11
     assert summary.reconciles is True
+    assert summary.estimated is False
 
 
 def test_discount_line_is_negative():
@@ -51,6 +52,22 @@ def test_unreadable_fee_line_breaks_reconciliation_rather_than_lying():
     summary = cart_summary_from_raw(raw, provider="blinkit")
     assert summary.reconciles is False
     assert "132" in summary.reconciliation_error
+
+
+def test_missing_grand_total_label_is_marked_estimated():
+    """No recognised grand-total label means the total is derived, not reported,
+    so it must not be presented as verified even though it trivially reconciles."""
+    raw = {
+        "lines": [{"text": "Milk\n1 L\n₹100", "handle": "h"}],
+        "billText": "Item total\n₹100\nDelivery charge\n₹25",
+        "etaText": "",
+    }
+    summary = cart_summary_from_raw(raw, provider="blinkit")
+    assert summary.total == 125.0
+    assert summary.reconciles is True
+    assert summary.estimated is True
+    assert "blinkit" in summary.raw_note
+    assert "total" in summary.raw_note.lower()
 
 
 def test_empty_cart():
