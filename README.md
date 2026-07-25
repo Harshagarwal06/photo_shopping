@@ -4,9 +4,9 @@ A local grocery assistant for typed requests and photographed handwritten lists.
 parses the request, searches a configured grocery provider, ranks one best product for
 each requested item, and builds a reviewable draft.
 
-Blinkit and Swiggy Instamart are both available from the provider selector. Instamart
-uses Swiggy's official MCP endpoint and OAuth 2.1 flow; Blinkit keeps its existing
-browser-automation integration.
+Blinkit, Swiggy Instamart, and Zepto are available from the provider selector.
+Instamart uses Swiggy's official MCP endpoint and OAuth 2.1 flow; Blinkit and
+Zepto use isolated local browser profiles.
 
 ## What is implemented
 
@@ -19,8 +19,12 @@ browser-automation integration.
 - Deterministic product ranking using relevance, pack fit, price, discount, delivery,
   ratings/reviews, sponsorship, and previous-order preference when available.
 - Read–merge–replace–verify cart updates, serialized to reduce lost-update races.
-- A strict MCP tool allowlist. Checkout, payment, order placement, cart clearing, and
-  address mutations are not exposed to the application.
+- A strict MCP tool allowlist. Checkout, payment, order placement, and address mutations
+  are not exposed; cart updates remain separately gated and operation-scoped.
+- Estimated cross-platform comparison with item coverage, fee estimates, substitutions,
+  delivery details, and a deterministic recommendation.
+- Token-gated verified comparison preflight that requires empty carts and explicit
+  provider-specific cart-write opt-ins.
 
 ## Setup
 
@@ -47,7 +51,9 @@ SWIGGY_OAUTH_BASE_URL=https://mcp.swiggy.com
 SWIGGY_REDIRECT_URI=http://localhost:8000/api/providers/instamart/callback
 
 AUTO_ADD_TO_CART=true
+BLINKIT_CART_WRITES=false
 INSTAMART_CART_WRITES=false
+ZEPTO_CART_WRITES=false
 CHECKOUT_DISABLED=true
 ```
 
@@ -71,6 +77,22 @@ the local app after its OAuth flow; Blinkit keeps the existing saved browser ses
 The app is currently configured for port `8000`; the OAuth redirect URI must use the
 same port and `localhost` host.
 
+## Compare apps
+
+Choose the platforms under **Compare across apps**, then select **Compare estimated
+prices**. Estimated mode searches every connected platform without changing a cart.
+It shows the selected products, quantities, coverage warnings, item subtotal, estimated
+fees, final total, and recommendation.
+
+**Check verified-mode readiness** is deliberately stricter. It is available only when
+every participating provider is connected, its cart is empty, and its provider-specific
+cart-write flag is enabled. The app then asks for one explicit confirmation before
+adding anything. Checkout and order placement remain unavailable.
+
+For version one, verified comparison refuses to run against non-empty carts. After a
+verified comparison, the user can keep the winning cart, keep all carts, or remove only
+the quantities recorded for that comparison operation.
+
 ## Safety model
 
 The app's Instamart integration is narrower than the remote MCP server:
@@ -86,10 +108,9 @@ The app's Instamart integration is narrower than the remote MCP server:
 
 ## Blinkit fallback
 
-Blinkit uses a persistent Playwright browser profile because it has no supported public
-consumer shopping API in this project. `GROCERY_PROVIDER=blinkit` only makes it the
-initial UI selection; Instamart remains available in the selector. Install Blinkit's
-browser once with:
+Blinkit and Zepto use separate persistent Playwright browser profiles because they have
+no supported public consumer shopping API in this project. `GROCERY_PROVIDER` only
+chooses the initial selection; all providers remain available. Install Chromium once:
 
 ```bash
 playwright install chromium

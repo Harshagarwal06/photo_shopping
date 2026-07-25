@@ -1,5 +1,9 @@
 # Multi-Platform Cart Comparison Implementation Plan
 
+> **Superseded for execution:** Use
+> `docs/superpowers/plans/2026-07-24-multi-platform-cart-comparison-revised.md`.
+> This original plan remains as design history.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the same grocery basket on Blinkit, Zepto, and Swiggy Instamart, read each platform's real cart total including fees, and deterministically recommend which one to order from.
