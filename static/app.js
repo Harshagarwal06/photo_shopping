@@ -10,6 +10,8 @@ const state = {
   cartMutationsAllowed: false,
   availableProviders: [],
   lastTotal: 0,
+  comparisonProposal: null,
+  comparisonOperation: null,
 };
 
 const ui = {
@@ -21,10 +23,14 @@ const ui = {
   help: document.querySelector("#request-help"),
   error: document.querySelector("#request-error"),
   draftButton: document.querySelector("#draft-button"),
+  compareButton: document.querySelector("#compare-button"),
+  comparisonProviders: document.querySelector("#comparison-providers"),
   loginButton: document.querySelector("#login-button"),
   providerSelect: document.querySelector("#provider-select"),
   addressPicker: document.querySelector("#address-picker"),
   addressSelect: document.querySelector("#address-select"),
+  addressEmpty: document.querySelector("#address-empty"),
+  refreshAddresses: document.querySelector("#refresh-addresses"),
   modeBadge: document.querySelector("#mode-badge"),
   progress: document.querySelector("#progress"),
   progressMessage: document.querySelector("#progress-message"),
@@ -32,6 +38,13 @@ const ui = {
   review: document.querySelector("#review"),
   groups: document.querySelector("#review-groups"),
   cartFlags: document.querySelector("#cart-flags"),
+  comparison: document.querySelector("#comparison"),
+  comparisonSummary: document.querySelector("#comparison-summary"),
+  comparisonWinner: document.querySelector("#comparison-winner"),
+  comparisonReasons: document.querySelector("#comparison-reasons"),
+  comparisonGrid: document.querySelector("#comparison-grid"),
+  verifyComparison: document.querySelector("#verify-comparison"),
+  comparisonDecision: document.querySelector("#comparison-decision"),
   total: document.querySelector("#draft-total"),
   totalBlock: document.querySelector(".total-block"),
   budgetStatus: document.querySelector("#budget-status"),
@@ -282,6 +295,270 @@ function renderDraft() {
   updateSummary();
 }
 
+function selectedComparisonProviders() {
+  return [...ui.comparisonProviders.querySelectorAll('input[type="checkbox"]:checked')]
+    .map((input) => input.value);
+}
+
+function comparisonOutcomeMarkup(outcome, winner) {
+  const failed = outcome.status !== "ok" || !outcome.summary;
+  if (failed) {
+    return `
+      <article class="platform-outcome is-failed">
+        <header>
+          <span class="comparison-status">${escapeHtml(outcome.status.replaceAll("_", " "))}</span>
+          <h3>${escapeHtml(outcome.display_name)}</h3>
+        </header>
+        <div class="coverage-warnings">
+          <p>${escapeHtml(outcome.error || "This platform could not be compared.")}</p>
+        </div>
+        <footer><span>Not ranked</span></footer>
+      </article>`;
+  }
+
+  const summary = outcome.summary;
+  const draft = state.comparisonProposal?.drafts?.[outcome.provider];
+  const itemLines = summary.lines.map((line) => {
+    const draftItem = draft?.items?.find(
+      (item) => item.selected_product_id === line.product_id,
+    );
+    const editor = draftItem && summary.estimated
+      ? `<span class="comparison-product-editor">
+          <select
+            class="comparison-product-select"
+            data-provider="${escapeHtml(outcome.provider)}"
+            data-item="${escapeHtml(draftItem.planned.id)}"
+            aria-label="Product for ${escapeHtml(draftItem.planned.search_term)} on ${escapeHtml(outcome.display_name)}"
+          >
+            ${draftItem.candidates.filter((candidate) => candidate.in_stock).map((candidate) =>
+              `<option value="${escapeHtml(candidate.id)}" ${candidate.id === draftItem.selected_product_id ? "selected" : ""}>${escapeHtml(candidate.name)} · ${escapeHtml(candidate.pack_size || "pack")} · ${money.format(candidate.price)}</option>`,
+            ).join("")}
+          </select>
+          <input
+            class="comparison-units"
+            type="number"
+            min="1"
+            max="50"
+            value="${escapeHtml(draftItem.units_to_add)}"
+            data-provider="${escapeHtml(outcome.provider)}"
+            data-item="${escapeHtml(draftItem.planned.id)}"
+            aria-label="Packs for ${escapeHtml(draftItem.planned.search_term)} on ${escapeHtml(outcome.display_name)}"
+          />
+        </span>`
+      : "";
+    return `
+    <li>
+      <span>
+        <strong>${escapeHtml(line.name)}</strong>
+        <small>${escapeHtml(line.quantity)} × ${money.format(line.unit_price)}</small>
+        ${editor}
+      </span>
+      <span>${money.format(line.line_total)}</span>
+    </li>`;
+  }).join("");
+  const feeLines = summary.fees.map((fee) => `
+    <li><span>${escapeHtml(fee.label)}</span><span>${money.format(fee.amount)}</span></li>`
+  ).join("");
+  const warnings = [
+    ...(outcome.missing_items ?? []).map((item) => `Missing: ${item}`),
+    ...(outcome.partial_items ?? []).map((item) => `Short quantity: ${item}`),
+    ...(outcome.unverified_items ?? []).map((item) => `Quantity not verified: ${item}`),
+  ];
+  const coverage = warnings.length
+    ? `${outcome.matched_items} matched · ${warnings.length} needs attention`
+    : `${outcome.matched_items} matched · full coverage`;
+  return `
+    <article class="platform-outcome${outcome.provider === winner ? " is-winner" : ""}">
+      <header>
+        <span class="comparison-status">${outcome.provider === winner ? "Recommended" : "Compared"}</span>
+        <h3>${escapeHtml(outcome.display_name)}</h3>
+        <span class="comparison-coverage">${escapeHtml(coverage)}</span>
+        ${summary.estimated ? '<span class="comparison-estimate">Estimated fees</span>' : '<span class="comparison-status">Verified cart total</span>'}
+      </header>
+      <ul class="comparison-lines">${itemLines || "<li><span>No matched products</span><span>—</span></li>"}</ul>
+      ${warnings.length ? `<div class="coverage-warnings">${warnings.map((warning) => `<p>${escapeHtml(warning)}</p>`).join("")}</div>` : ""}
+      <ul class="bill-lines">
+        <li><span>Item subtotal</span><span>${money.format(summary.subtotal)}</span></li>
+        ${feeLines}
+        <li><span>Final total</span><span>${money.format(summary.total)}</span></li>
+      </ul>
+      <footer>
+        <span>${summary.delivery_eta_minutes != null ? `${escapeHtml(summary.delivery_eta_minutes)} min delivery` : "Delivery time unavailable"}</span>
+        ${summary.raw_note ? `<small>${escapeHtml(summary.raw_note)}</small>` : ""}
+      </footer>
+    </article>`;
+}
+
+function renderComparison(report) {
+  const winner = report.winner;
+  const winnerOutcome = report.platforms.find((outcome) => outcome.provider === winner);
+  ui.comparisonWinner.innerHTML = winnerOutcome
+    ? `<span>${report.estimated ? "Estimated best option" : "Verified best option"}</span><strong>${escapeHtml(winnerOutcome.display_name)}</strong><span>${money.format(winnerOutcome.summary.total)}</span>`
+    : "";
+  ui.comparisonSummary.textContent = report.estimated
+    ? "Estimated totals use product prices plus clearly labelled fee estimates. No cart was changed."
+    : "Totals were read from provider carts and checked against their fee breakdowns.";
+  ui.comparisonReasons.innerHTML = (report.reasons ?? [])
+    .map((reason) => `<p>${escapeHtml(reason)}</p>`)
+    .join("");
+  ui.comparisonGrid.innerHTML = report.platforms
+    .map((outcome) => comparisonOutcomeMarkup(outcome, winner))
+    .join("");
+  ui.comparison.hidden = false;
+  ui.comparisonDecision.hidden = !state.comparisonOperation;
+  ui.comparison.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function overrideComparisonSelection(providerId, itemId, productId, units) {
+  if (!state.comparisonProposal) return;
+  try {
+    const response = await fetch(
+      `/api/comparisons/proposals/${encodeURIComponent(state.comparisonProposal.id)}/override`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider_id: providerId,
+          planned_item_id: itemId,
+          product_id: productId,
+          units_to_add: Math.max(1, Math.min(50, Number(units) || 1)),
+        }),
+      },
+    );
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || "Comparison choice failed.");
+    state.comparisonProposal = payload;
+    renderComparison(payload.report);
+    showToast("Comparison updated. Verified-mode confirmation must be checked again.");
+  } catch (error) {
+    showToast(error.message, { tone: "error", sticky: true });
+  }
+}
+
+async function compareEstimated() {
+  const hasText = Boolean(ui.text.value.trim());
+  const hasImage = Boolean(ui.image.files[0]);
+  const providerIds = selectedComparisonProviders();
+  if (!hasText && !hasImage) {
+    showRequestError("Add a photo or type the grocery list before comparing apps.");
+    ui.text.focus();
+    return;
+  }
+  if (!providerIds.length) {
+    showToast("Choose at least one app to compare.", { tone: "error" });
+    return;
+  }
+
+  showRequestError("");
+  setButtonState(ui.compareButton, "loading");
+  ui.progress.hidden = false;
+  ui.review.hidden = true;
+  ui.confirmBar.hidden = true;
+  ui.comparison.hidden = true;
+  ui.progressMessage.textContent = "Planning once, then searching connected apps…";
+  setStage("planner");
+
+  const formData = new FormData();
+  formData.append("text", ui.text.value);
+  formData.append("provider_ids", providerIds.join(","));
+  if (hasImage) formData.append("image", ui.image.files[0]);
+
+  try {
+    const response = await fetch("/api/comparisons/estimate", {
+      method: "POST",
+      body: formData,
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || "Comparison failed.");
+    state.comparisonProposal = payload;
+    state.comparisonOperation = null;
+    ui.progressMessage.textContent = "Estimated comparison ready.";
+    completeStages();
+    renderComparison(payload.report);
+    setButtonState(ui.compareButton, "success");
+    window.setTimeout(() => setButtonState(ui.compareButton), 1200);
+  } catch (error) {
+    setButtonState(ui.compareButton, "error");
+    ui.progressMessage.textContent = error.message;
+    showToast(error.message, { tone: "error", sticky: true });
+    window.setTimeout(() => setButtonState(ui.compareButton), 1800);
+  }
+}
+
+async function verifyComparisonReadiness() {
+  if (!state.comparisonProposal) return;
+  setButtonState(ui.verifyComparison, "loading");
+  try {
+    const preflightResponse = await fetch(
+      `/api/comparisons/proposals/${encodeURIComponent(state.comparisonProposal.id)}/verify-preflight`,
+      { method: "POST" },
+    );
+    const preflight = await preflightResponse.json();
+    if (!preflightResponse.ok) {
+      throw new Error(preflight.detail || "Verified-mode preflight failed.");
+    }
+    if (!preflight.can_continue || !preflight.confirmation_token) {
+      const details = preflight.platforms
+        .filter((platform) => !platform.eligible)
+        .map((platform) => `${platform.display_name}: ${platform.message}`)
+        .join(" ");
+      throw new Error(details || "Verified comparison is not ready.");
+    }
+    const confirmed = window.confirm(
+      "Verified comparison will temporarily add the reviewed items to every eligible cart. Carts must be empty. Checkout remains disabled. Continue?",
+    );
+    if (!confirmed) return;
+
+    const verifyResponse = await fetch(
+      `/api/comparisons/proposals/${encodeURIComponent(state.comparisonProposal.id)}/verify`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmation_token: preflight.confirmation_token }),
+      },
+    );
+    const operation = await verifyResponse.json();
+    if (!verifyResponse.ok) {
+      throw new Error(operation.detail || "Verified comparison failed.");
+    }
+    state.comparisonOperation = operation;
+    renderComparison(operation.report);
+    showToast("Verified cart totals are ready. No checkout was attempted.");
+  } catch (error) {
+    showToast(error.message, { tone: "error", sticky: true });
+  } finally {
+    setButtonState(ui.verifyComparison);
+  }
+}
+
+async function chooseComparisonAction(action) {
+  if (!state.comparisonOperation) return;
+  const response = await fetch(
+    `/api/comparisons/${encodeURIComponent(state.comparisonOperation.id)}/choose`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action,
+        winner: state.comparisonOperation.report.winner,
+      }),
+    },
+  );
+  const payload = await response.json();
+  if (!response.ok) {
+    showToast(payload.detail || "Cart cleanup failed.", { tone: "error", sticky: true });
+    return;
+  }
+  state.comparisonOperation = payload;
+  const failed = (payload.cleanup ?? []).filter((outcome) => !outcome.success);
+  showToast(
+    failed.length
+      ? failed.map((outcome) => outcome.message).join(" ")
+      : "Comparison cart choice applied. Checkout remains manual.",
+    { tone: failed.length ? "error" : "default", sticky: Boolean(failed.length) },
+  );
+}
+
 function findItem(element) {
   const id = element.closest("[data-item-id]")?.dataset.itemId;
   return state.draft?.items.find((item) => item.planned.id === id) ?? null;
@@ -458,6 +735,34 @@ ui.image.addEventListener("change", () => {
 });
 
 ui.form.addEventListener("submit", buildDraft);
+ui.compareButton.addEventListener("click", compareEstimated);
+ui.verifyComparison.addEventListener("click", verifyComparisonReadiness);
+ui.comparisonDecision.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-comparison-action]");
+  if (button) chooseComparisonAction(button.dataset.comparisonAction);
+});
+ui.comparisonGrid.addEventListener("change", (event) => {
+  const control = event.target.closest(".comparison-product-select, .comparison-units");
+  if (!control) return;
+  const providerId = control.dataset.provider;
+  const itemId = control.dataset.item;
+  const matching = [...ui.comparisonGrid.querySelectorAll(
+    ".comparison-product-select, .comparison-units",
+  )].filter(
+    (candidate) =>
+      candidate.dataset.provider === providerId
+      && candidate.dataset.item === itemId,
+  );
+  const select = matching.find((candidate) =>
+    candidate.classList.contains("comparison-product-select")
+  );
+  const units = matching.find((candidate) =>
+    candidate.classList.contains("comparison-units")
+  );
+  if (select && units) {
+    overrideComparisonSelection(providerId, itemId, select.value, units.value);
+  }
+});
 
 ui.loginButton.addEventListener("click", async () => {
   setButtonState(ui.loginButton, "loading");
@@ -508,6 +813,26 @@ ui.addressSelect.addEventListener("change", async () => {
   }
 });
 
+ui.refreshAddresses.addEventListener("click", async () => {
+  setButtonState(ui.refreshAddresses, "loading");
+  try {
+    await loadProviderStatus(true);
+    const addressCount = ui.addressSelect.options.length;
+    if (addressCount > 0) {
+      showToast("Swiggy delivery addresses refreshed.");
+    } else {
+      showToast("No saved address found yet. Add one in Swiggy, then refresh again.", {
+        tone: "error",
+        sticky: true,
+      });
+    }
+  } catch (error) {
+    showToast(error.message, { tone: "error", sticky: true });
+  } finally {
+    setButtonState(ui.refreshAddresses);
+  }
+});
+
 function clearDraftForProviderChange() {
   state.draft = null;
   state.lastTotal = 0;
@@ -532,7 +857,9 @@ ui.providerSelect.addEventListener("change", async () => {
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || "Provider selection failed.");
     clearDraftForProviderChange();
-    await refreshApplicationState();
+    // Re-read the persistent browser/OAuth session after changing providers.
+    // Server restarts intentionally clear the backend's in-memory connection flag.
+    await refreshApplicationState(true);
     showToast(`Now shopping with ${state.providerName}.`);
   } catch (error) {
     ui.providerSelect.value = previousProvider;
@@ -614,8 +941,8 @@ function applyHealth(health) {
 
   ui.modeBadge.textContent = health.demo_mode
     ? "SAFE DEMO · PROVIDERS OFF"
-    : state.provider === "instamart" && !state.cartMutationsAllowed
-      ? "INSTAMART TEST · CART WRITES OFF"
+    : !state.cartMutationsAllowed
+      ? `${state.providerName.toUpperCase()} SAFE TEST · CART WRITES OFF`
     : health.safety_lock
       ? "SAFETY LOCK · CART CLICKS OFF"
       : health.dry_run
@@ -651,7 +978,7 @@ async function initialise() {
   try {
     const params = new URLSearchParams(window.location.search);
     const requestedProvider = params.get("provider");
-    if (requestedProvider === "blinkit" || requestedProvider === "instamart") {
+    if (requestedProvider === "blinkit" || requestedProvider === "instamart" || requestedProvider === "zepto") {
       const response = await fetch("/api/providers/select", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -659,7 +986,9 @@ async function initialise() {
       });
       if (!response.ok) throw new Error("The requested grocery provider is unavailable.");
     }
-    await refreshApplicationState(params.has("provider_connected"));
+    // Persistent provider sessions survive a local-server restart, but the
+    // backend's cached connection flags do not.
+    await refreshApplicationState(true);
   } catch {
     ui.modeBadge.textContent = "BACKEND OFFLINE";
   }
@@ -676,6 +1005,11 @@ function applyProviderStatus(status) {
 
   const addresses = status.addresses ?? [];
   ui.addressPicker.hidden = !status.connected || addresses.length === 0;
+  ui.addressEmpty.hidden = !(
+    state.provider === "instamart"
+    && status.connected
+    && addresses.length === 0
+  );
   ui.addressSelect.innerHTML = [
     status.requires_address ? '<option value="">Choose an address</option>' : "",
     ...addresses.map((address) =>

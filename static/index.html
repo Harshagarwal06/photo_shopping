@@ -6,7 +6,7 @@
     <title>Photo Shopping</title>
     <meta name="description" content="Turn a grocery photo or typed request into a ranked instant-grocery cart." />
     <link rel="stylesheet" href="/styles.css" />
-    <script src="/app.js?v=multi-provider-1" defer></script>
+    <script src="/app.js?v=comparison-1" defer></script>
   </head>
   <body>
     <header class="nav-slab">
@@ -28,6 +28,16 @@
           <span>Delivery address</span>
           <select id="address-select"></select>
         </label>
+        <div class="address-empty" id="address-empty" hidden>
+          <a
+            class="btn btn--soft btn--compact"
+            href="https://www.swiggy.com/instamart"
+          >Open Swiggy to add address</a>
+          <button class="btn btn--soft btn--compact" id="refresh-addresses" type="button">
+            <span class="button-label">Refresh addresses</span>
+            <span class="spinner" aria-hidden="true"></span>
+          </button>
+        </div>
         <button class="btn btn--soft btn--compact" id="login-button" type="button">Connect Blinkit</button>
       </div>
     </header>
@@ -73,12 +83,28 @@
             </label>
           </div>
 
+          <fieldset class="comparison-options">
+            <legend>Compare across apps</legend>
+            <p>Estimated comparison never changes a cart.</p>
+            <div class="platform-checks" id="comparison-providers">
+              <label><input type="checkbox" value="blinkit" checked /> Blinkit</label>
+              <label><input type="checkbox" value="instamart" checked /> Swiggy Instamart</label>
+              <label><input type="checkbox" value="zepto" checked /> Zepto</label>
+            </div>
+          </fieldset>
+
           <div class="form-actions">
             <p>Nothing is added until you confirm the finished draft.</p>
-            <button class="btn btn--primary" id="draft-button" type="submit">
-              <span class="button-label">Build draft cart</span>
-              <span class="spinner" aria-hidden="true"></span>
-            </button>
+            <div class="form-action-buttons">
+              <button class="btn btn--soft" id="draft-button" type="submit">
+                <span class="button-label">Build one cart</span>
+                <span class="spinner" aria-hidden="true"></span>
+              </button>
+              <button class="btn btn--primary" id="compare-button" type="button">
+                <span class="button-label">Compare estimated prices</span>
+                <span class="spinner" aria-hidden="true"></span>
+              </button>
+            </div>
           </div>
         </form>
       </section>
@@ -112,6 +138,40 @@
         </header>
         <div class="cart-flags" id="cart-flags" role="status"></div>
         <div class="review-groups" id="review-groups"></div>
+      </section>
+
+      <section class="comparison-shell" id="comparison" aria-labelledby="comparison-title" hidden>
+        <header class="comparison-head">
+          <div>
+            <span class="comparison-kicker">Estimated comparison</span>
+            <h2 id="comparison-title">Same list, app by app.</h2>
+            <p id="comparison-summary">Comparing item coverage, estimated fees, and delivery.</p>
+          </div>
+          <div class="comparison-winner" id="comparison-winner" aria-live="polite"></div>
+        </header>
+        <div class="comparison-reasons" id="comparison-reasons" role="status"></div>
+        <div class="comparison-grid" id="comparison-grid"></div>
+        <div class="comparison-actions">
+          <div>
+            <strong>Want exact fees?</strong>
+            <p>Verified mode requires empty carts, provider write access, and one explicit confirmation.</p>
+          </div>
+          <button class="btn btn--soft" id="verify-comparison" type="button">
+            <span class="button-label">Check verified-mode readiness</span>
+            <span class="spinner" aria-hidden="true"></span>
+          </button>
+        </div>
+        <div class="comparison-actions" id="comparison-decision" hidden>
+          <div>
+            <strong>Choose what happens to the compared carts</strong>
+            <p>The app never checks out. It only keeps or removes comparison-created quantities.</p>
+          </div>
+          <div class="form-action-buttons">
+            <button class="btn btn--primary" type="button" data-comparison-action="keep_winner">Keep winner, clear losers</button>
+            <button class="btn btn--soft" type="button" data-comparison-action="keep_all">Keep all carts</button>
+            <button class="btn btn--soft" type="button" data-comparison-action="clear_all">Clear comparison carts</button>
+          </div>
+        </div>
       </section>
     </main>
 
