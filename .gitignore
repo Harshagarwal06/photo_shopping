@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 *.py[cod]
 browser_profile/
+browser_profile_zepto/
 .DS_Store
 
 
