@@ -115,3 +115,28 @@ def test_out_of_stock_phrases_are_detected():
         products = zepto_products_from_raw("milk", raw, limit=5, base_url="https://www.zeptonow.com")
         assert len(products) == 1, f"Failed for phrase: {phrase}"
         assert products[0].in_stock is False, f"Failed for phrase: {phrase}"
+
+
+def test_structured_zepto_card_fields_override_button_text():
+    raw = [
+        {
+            "text": "ADD\n₹24\nNandini Toned Fresh Milk | Pouch\n1 pack (500 ml)",
+            "name": "Nandini Toned Fresh Milk | Pouch",
+            "pack": "1 pack (500 ml)",
+            "href": "/pn/nandini-milk/pvid/1",
+            "image": "https://cdn.zeptonow.com/nandini.png",
+            "addText": "ADD",
+            "inStock": True,
+        },
+    ]
+
+    products = zepto_products_from_raw(
+        "milk",
+        raw,
+        limit=5,
+        base_url="https://www.zepto.com",
+    )
+
+    assert products[0].name == "Nandini Toned Fresh Milk | Pouch"
+    assert products[0].pack_size == "1 pack (500 ml)"
+    assert products[0].price == 24

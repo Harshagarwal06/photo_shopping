@@ -204,6 +204,88 @@ class ComparisonReport(BaseModel):
     estimated: bool = False
 
 
+class ProviderCapabilities(BaseModel):
+    search: bool = True
+    cart_read: bool = False
+    cart_add: bool = False
+    operation_cleanup: bool = False
+    checkout: bool = False
+
+
+class PlatformPreflight(BaseModel):
+    provider: str
+    display_name: str
+    connected: bool = False
+    eligible: bool = False
+    cart_empty: bool | None = None
+    cart_mutations_allowed: bool = False
+    capabilities: ProviderCapabilities = Field(default_factory=ProviderCapabilities)
+    message: str = ""
+
+
+class ComparisonPreflight(BaseModel):
+    mode: Literal["estimated", "verified"] = "estimated"
+    platforms: list[PlatformPreflight] = Field(default_factory=list)
+    can_continue: bool = False
+    requires_confirmation: bool = False
+    confirmation_token: str | None = None
+
+
+class ComparisonProposal(BaseModel):
+    id: str = Field(default_factory=lambda: uuid4().hex)
+    mode: Literal["estimated", "verified"] = "estimated"
+    plan: CartPlan
+    report: ComparisonReport
+    provider_ids: list[str] = Field(default_factory=list)
+    drafts: dict[str, DraftCart] = Field(default_factory=dict)
+    frozen: bool = False
+
+
+class ProposalOverrideRequest(BaseModel):
+    provider_id: Literal["blinkit", "instamart", "zepto"]
+    planned_item_id: str = Field(min_length=1)
+    product_id: str = Field(min_length=1)
+    units_to_add: int = Field(ge=1, le=50)
+
+
+class ComparisonPreflightRequest(BaseModel):
+    provider_ids: list[Literal["blinkit", "instamart", "zepto"]] = Field(
+        default_factory=lambda: ["blinkit", "instamart", "zepto"]
+    )
+    mode: Literal["estimated", "verified"] = "estimated"
+    proposal_id: str | None = None
+
+
+class VerifiedComparisonRequest(BaseModel):
+    confirmation_token: str = Field(min_length=16)
+
+
+class ComparisonChoiceRequest(BaseModel):
+    action: Literal["keep_winner", "keep_all", "clear_all"] = "keep_winner"
+    winner: Literal["blinkit", "instamart", "zepto"] | None = None
+
+
+class CleanupOutcome(BaseModel):
+    provider: str
+    success: bool
+    message: str
+
+
+class ComparisonOperation(BaseModel):
+    id: str = Field(default_factory=lambda: uuid4().hex)
+    proposal_id: str
+    provider_ids: list[str] = Field(default_factory=list)
+    report: ComparisonReport
+    status: Literal[
+        "completed",
+        "cleanup_pending",
+        "cleaned",
+        "cleanup_failed",
+    ] = "completed"
+    winner: str | None = None
+    cleanup: list[CleanupOutcome] = Field(default_factory=list)
+
+
 class ConfirmResponse(BaseModel):
     results: list[AddResult]
     succeeded: int

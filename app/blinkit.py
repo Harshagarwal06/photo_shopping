@@ -629,6 +629,86 @@ class BlinkitClient:
                     message=f"Blinkit could not add this item: {str(exc).splitlines()[0]}",
                 )
 
+    async def cart_summary(self) -> CartSummary:
+        await self.ensure_login()
+        async with self._lock:
+            page = await self._get_page()
+            await page.goto(
+                f"{self.settings.blinkit_base_url}/cart",
+                wait_until="domcontentloaded",
+            )
+            await page.wait_for_timeout(500)
+            raw = await page.evaluate(
+                r"""() => {
+                  const text = node => (node?.innerText || '').trim();
+                  const productRoots = [
+                    ...new Set(
+                      [...document.querySelectorAll(
+                        'button, [role="button"], [data-testid*="cart"]'
+                      )]
+                        .map(node => node.closest('article, li, [role="listitem"], section, div'))
+                        .filter(node => node && /₹\s*[\d,]+/.test(text(node))
+                          && node.querySelector('img'))
+                    )
+                  ];
+                  const lines = productRoots.slice(0, 100).map(node => ({
+                    text: text(node),
+                    handle: node.querySelector('a[href*="/prn/"]')?.href
+                      || node.querySelector('img')?.src || text(node).slice(0, 120)
+                  }));
+                  const billHeading = [...document.querySelectorAll('h1,h2,h3,h4,div,span')]
+                    .find(node => /^bill details$/i.test(text(node)));
+                  const billRoot = billHeading?.closest('section, article, [role="dialog"], div');
+                  const etaNode = [...document.querySelectorAll('body *')]
+                    .find(node => /delivery\s+(?:in|by)\s+\d+\s*(?:min|minute)/i.test(text(node))
+                      && node.children.length < 4);
+                  return {
+                    lines,
+                    billText: text(billRoot),
+                    etaText: text(etaNode)
+                  };
+                }"""
+            )
+            return cart_summary_from_raw(raw, provider="blinkit")
+
+    async def remove_from_cart(self, product: Product, qty: int) -> None:
+        if qty < 1:
+            return
+        if not self.settings.cart_mutations_allowed_for("blinkit"):
+            raise BlinkitError("Blinkit cart writes are disabled.")
+        await self.ensure_login()
+        async with self._lock:
+            page = await self._get_page()
+            await page.goto(
+                f"{self.settings.blinkit_base_url}/cart",
+                wait_until="domcontentloaded",
+            )
+            await page.wait_for_timeout(400)
+            cards = page.locator(
+                'article, li, [role="listitem"], [data-testid*="cart"]',
+                has_text=product.name,
+            )
+            if not await cards.count():
+                raise BlinkitError(
+                    f"{product.name} was not found in the Blinkit cart during cleanup."
+                )
+            card = cards.first
+            minus = card.locator(
+                'button:has(.icon-minus), button[aria-label*="decrease" i], '
+                '[role="button"][aria-label*="decrease" i]'
+            )
+            if not await minus.count():
+                minus = card.get_by_text(re.compile(r"^[−-]$"))
+            if not await minus.count():
+                raise BlinkitError(
+                    f"Blinkit's quantity control was unavailable for {product.name}."
+                )
+            for _ in range(qty):
+                if not await minus.first.is_visible():
+                    break
+                await minus.first.click()
+                await page.wait_for_timeout(120)
+
     async def _find_product_card(self, page: Page, query: str, product: Product):
         """Find a hydrated product card without clicking it.
 

@@ -11,19 +11,27 @@ from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from .comparison_service import ComparisonService
 from .config import ROOT, get_settings
 from .constraints import enforce_constraints
 from .matcher import match_product
 from .models import (
     AddressSelectionRequest,
     CartConstraints,
+    ComparisonChoiceRequest,
+    ComparisonOperation,
+    ComparisonPreflight,
+    ComparisonPreflightRequest,
+    ComparisonProposal,
     ConfirmRequest,
     ConfirmResponse,
     DraftCart,
     DraftItem,
     ProviderSelectionRequest,
+    ProposalOverrideRequest,
     SearchRequest,
     StreamEvent,
+    VerifiedComparisonRequest,
 )
 from .planner import plan_cart
 from .providers import GroceryProvider, ProviderError, create_providers
@@ -31,6 +39,7 @@ from .providers import GroceryProvider, ProviderError, create_providers
 
 settings = get_settings()
 providers = create_providers(settings)
+comparison_service = ComparisonService(providers, settings)
 ACTIVE_PROVIDER_ID = settings.grocery_provider
 DRAFTS: dict[str, DraftCart] = {}
 DRAFT_CONSTRAINTS: dict[str, CartConstraints] = {}
@@ -72,7 +81,9 @@ async def health() -> dict[str, object]:
         "grocery_provider": provider.provider_id,
         "provider_name": provider.display_name,
         "auto_add_to_cart": settings.auto_add_to_cart,
+        "blinkit_cart_writes": settings.blinkit_cart_writes,
         "instamart_cart_writes": settings.instamart_cart_writes,
+        "zepto_cart_writes": settings.zepto_cart_writes,
         "cart_mutations_allowed": provider_mutations_allowed(provider),
         "checkout_disabled": True,
         "providers": [
@@ -429,6 +440,130 @@ async def confirm_cart(request: ConfirmRequest) -> ConfirmResponse:
         failed=len(results) - succeeded,
         dry_run=not mutations_allowed,
     )
+
+
+@app.post("/api/comparisons/preflight", response_model=ComparisonPreflight)
+async def comparison_preflight(
+    request: ComparisonPreflightRequest,
+) -> ComparisonPreflight:
+    return await comparison_service.preflight(
+        list(request.provider_ids),
+        mode=request.mode,
+        proposal_id=request.proposal_id,
+    )
+
+
+@app.post("/api/comparisons/estimate", response_model=ComparisonProposal)
+async def estimate_comparison(
+    text: str = Form(default=""),
+    image: UploadFile | None = File(default=None),
+    provider_ids: str = Form(default="blinkit,instamart,zepto"),
+) -> ComparisonProposal:
+    image_bytes: bytes | None = None
+    image_type = "image/jpeg"
+    if image is not None:
+        image_type = image.content_type or image_type
+        if not image_type.startswith("image/"):
+            raise HTTPException(status_code=415, detail="The uploaded file must be an image.")
+        image_bytes = await image.read()
+        if len(image_bytes) > 12 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="The image must be smaller than 12 MB.")
+    if not text.strip() and not image_bytes:
+        raise HTTPException(status_code=422, detail="Add a photo, a typed request, or both.")
+
+    selected = [
+        provider_id.strip()
+        for provider_id in provider_ids.split(",")
+        if provider_id.strip()
+    ]
+    if not selected:
+        raise HTTPException(status_code=422, detail="Choose at least one provider.")
+    try:
+        plan = await asyncio.to_thread(
+            plan_cart,
+            text=text,
+            image_bytes=image_bytes,
+            image_media_type=image_type,
+            settings=settings,
+        )
+        return await comparison_service.estimate(plan, selected)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post(
+    "/api/comparisons/proposals/{proposal_id}/verify-preflight",
+    response_model=ComparisonPreflight,
+)
+async def verified_comparison_preflight(
+    proposal_id: str,
+) -> ComparisonPreflight:
+    proposal = comparison_service.proposals.get(proposal_id)
+    if proposal is None:
+        raise HTTPException(status_code=404, detail="Comparison proposal not found.")
+    return await comparison_service.preflight(
+        proposal.provider_ids,
+        mode="verified",
+        proposal_id=proposal_id,
+    )
+
+
+@app.post(
+    "/api/comparisons/proposals/{proposal_id}/override",
+    response_model=ComparisonProposal,
+)
+async def override_comparison_proposal(
+    proposal_id: str,
+    request: ProposalOverrideRequest,
+) -> ComparisonProposal:
+    try:
+        return comparison_service.override(proposal_id, request)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post(
+    "/api/comparisons/proposals/{proposal_id}/verify",
+    response_model=ComparisonOperation,
+)
+async def verify_comparison(
+    proposal_id: str,
+    request: VerifiedComparisonRequest,
+) -> ComparisonOperation:
+    try:
+        return await comparison_service.verify(
+            proposal_id,
+            request.confirmation_token,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get(
+    "/api/comparisons/{operation_id}",
+    response_model=ComparisonOperation,
+)
+async def get_comparison(operation_id: str) -> ComparisonOperation:
+    operation = comparison_service.operations.get(operation_id)
+    if operation is None:
+        raise HTTPException(status_code=404, detail="Comparison operation not found.")
+    return operation
+
+
+@app.post(
+    "/api/comparisons/{operation_id}/choose",
+    response_model=ComparisonOperation,
+)
+async def choose_comparison(
+    operation_id: str,
+    request: ComparisonChoiceRequest,
+) -> ComparisonOperation:
+    try:
+        return await comparison_service.choose(operation_id, request)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 static_dir = Path(ROOT / "static")

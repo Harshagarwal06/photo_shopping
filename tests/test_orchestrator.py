@@ -65,6 +65,7 @@ def _write_settings():
         safety_lock=False,
         dry_run=False,
         demo_mode=False,
+        blinkit_cart_writes=True,
         zepto_cart_writes=True,
         model_backend="local",
     )

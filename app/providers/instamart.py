@@ -6,7 +6,7 @@ from collections import Counter
 from typing import Any, Iterable
 
 from ..config import Settings
-from ..models import AddResult, Product
+from ..models import AddResult, Product, ProviderCapabilities
 from .base import (
     CartLine,
     CartSummary,
@@ -25,7 +25,7 @@ from .token_store import KeyringTokenStore, TokenStore
 
 
 SPIN_KEYS = ("spinId", "spin_id", "spinID")
-NAME_KEYS = ("name", "title", "productName", "product_name")
+NAME_KEYS = ("name", "title", "productName", "product_name", "displayName")
 PACK_KEYS = ("packSize", "pack_size", "quantityDescription", "variantName", "displayName")
 PRICE_KEYS = ("offerPrice", "sellingPrice", "finalPrice", "price")
 MRP_KEYS = ("mrp", "maxRetailPrice", "listPrice")
@@ -42,7 +42,16 @@ def _first(node: dict, keys: Iterable[str], default=None):
 
 def _number(value: Any, *, key: str = "") -> float | None:
     if isinstance(value, dict):
-        for nested_key in ("value", "amount", "price", "units"):
+        for nested_key in (
+            "offerPrice",
+            "sellingPrice",
+            "finalPrice",
+            "value",
+            "amount",
+            "price",
+            "units",
+            "mrp",
+        ):
             if nested_key in value:
                 return _number(value[nested_key], key=nested_key)
         return None
@@ -59,6 +68,15 @@ def _number(value: Any, *, key: str = "") -> float | None:
 
 
 def _integer(value: Any, default: int = 0) -> int:
+    if isinstance(value, str):
+        abbreviated = re.search(
+            r"(-?\d+(?:,\d{3})*(?:\.\d+)?)\s*([km])\b",
+            value.casefold(),
+        )
+        if abbreviated:
+            number = float(abbreviated.group(1).replace(",", ""))
+            multiplier = 1_000 if abbreviated.group(2) == "k" else 1_000_000
+            return max(0, int(number * multiplier))
     number = _number(value)
     return max(0, int(number)) if number is not None else default
 
@@ -87,6 +105,9 @@ def _walk_product_nodes(
         found = _first(value, keys)
         if found not in (None, "") and not isinstance(found, (dict, list)):
             context[target] = str(found)
+    promoted = _first(value, ("isPromoted", "sponsored"))
+    if promoted is not None:
+        context["sponsored"] = bool(promoted)
 
     spin_id = _first(value, SPIN_KEYS)
     if spin_id:
@@ -124,18 +145,41 @@ def products_from_instamart(payload: dict, query: str, limit: int = 10) -> list[
 
         mrp_key = next((key for key in MRP_KEYS if node.get(key) not in (None, "")), "")
         mrp = _number(node.get(mrp_key), key=mrp_key) if mrp_key else None
+        price_details = node.get("price")
+        if mrp is None and isinstance(price_details, dict):
+            nested_mrp_key = next(
+                (key for key in MRP_KEYS if price_details.get(key) not in (None, "")),
+                "",
+            )
+            mrp = (
+                _number(price_details.get(nested_mrp_key), key=nested_mrp_key)
+                if nested_mrp_key
+                else None
+            )
         pack = str(_first(node, PACK_KEYS, context.get("pack", "")) or "").strip()
         image = _first(node, IMAGE_KEYS, context.get("image"))
         if isinstance(image, dict):
             image = _first(image, ("url", "src", "value"))
-        rating = _number(_first(node, ("rating", "averageRating", "avgRating")))
+        rating_value = _first(node, ("rating", "averageRating", "avgRating"))
+        rating = _number(rating_value)
         review_count = _integer(_first(node, ("reviewCount", "ratingCount", "ratingsCount")))
-        available_value = _first(node, ("inStock", "available", "isAvailable"), True)
+        if not review_count and isinstance(rating_value, dict):
+            review_count = _integer(_first(rating_value, ("count", "ratingCount")))
+        available_value = _first(
+            node,
+            ("inStock", "available", "isAvailable", "isInStockAndAvailable", "isAvail"),
+            True,
+        )
         in_stock = bool(available_value) and not bool(node.get("outOfStock"))
         discount = _number(_first(node, ("discountPercent", "discount_percentage")))
         if discount is None and mrp and mrp > price:
             discount = round((mrp - price) / mrp * 100, 1)
         eta = _integer(_first(node, ("deliveryMinutes", "etaMinutes", "eta"))) or None
+        if eta is None and isinstance(node.get("sla"), dict):
+            eta = _integer(_first(node["sla"], ("value", "minutes"))) or None
+        sponsored = bool(
+            _first(node, ("isPromoted", "sponsored"), context.get("sponsored", False))
+        )
 
         seen.add(spin_id)
         products.append(
@@ -151,6 +195,7 @@ def products_from_instamart(payload: dict, query: str, limit: int = 10) -> list[
                 review_count=review_count,
                 image_url=str(image) if image else None,
                 in_stock=in_stock,
+                sponsored=sponsored,
                 handle=spin_id,
                 search_query=query,
             )
@@ -323,14 +368,31 @@ def addresses_from_instamart(payload: dict) -> list[ProviderAddress]:
             return
         if not isinstance(value, dict):
             return
-        address_id = _first(value, ("addressId", "address_id"))
+        address_id = _first(value, ("addressId", "address_id", "id"))
         if address_id and str(address_id) not in seen:
             label = str(
-                _first(value, ("label", "name", "type", "addressType"), "Saved address")
+                _first(
+                    value,
+                    (
+                        "label",
+                        "name",
+                        "type",
+                        "addressType",
+                        "addressTag",
+                        "addressCategory",
+                    ),
+                    "Saved address",
+                )
             )
             detail_value = _first(
                 value,
-                ("displayAddress", "formattedAddress", "address", "subtitle"),
+                (
+                    "displayAddress",
+                    "formattedAddress",
+                    "address",
+                    "subtitle",
+                    "addressLine",
+                ),
                 "",
             )
             detail = detail_value if isinstance(detail_value, str) else ""
@@ -374,6 +436,7 @@ class InstamartProvider(GroceryProvider):
         self._history_address_id: str | None = None
         self._cart_lock = asyncio.Lock()
         self._applied_operations: set[str] = set()
+        self._operation_additions: dict[str, dict[str, int]] = {}
 
     async def connect(self) -> ConnectResult:
         return ConnectResult(
@@ -433,7 +496,10 @@ class InstamartProvider(GroceryProvider):
                 if self._addresses and selected is None
                 else "Instamart connected."
                 if selected
-                else "Add a delivery address in Swiggy before continuing."
+                else (
+                    "No saved address found. Open Swiggy to add one, "
+                    "then refresh addresses here."
+                )
             ),
         )
 
@@ -581,6 +647,7 @@ class InstamartProvider(GroceryProvider):
                     for product, quantity in selections
                 ]
             self._applied_operations.add(operation_id)
+            self._operation_additions[operation_id] = additions
 
         return [
             AddResult(
@@ -603,12 +670,26 @@ class InstamartProvider(GroceryProvider):
             raise ProviderSafetyError(
                 "Instamart cart writes are disabled, so the cart was not cleared."
             )
+        additions = self._operation_additions.get(operation_id)
+        if additions is None:
+            raise ProviderSafetyError(
+                "Instamart has no comparison-cart ledger for this operation."
+            )
         address_id = await self._ready_address_id()
         async with self._cart_lock:
             payload = await self.transport.call_tool("get_cart")
-            updates = zeroed_cart_update(payload)
-            if not updates:
+            current = cart_items_from_instamart(payload)
+            if not current:
+                self._operation_additions.pop(operation_id, None)
+                self._applied_operations.discard(operation_id)
                 return
+            expected = dict(current)
+            for spin_id, quantity in additions.items():
+                expected[spin_id] = max(0, expected.get(spin_id, 0) - quantity)
+            updates = [
+                {"spinId": spin_id, "quantity": quantity}
+                for spin_id, quantity in expected.items()
+            ]
             await self.transport.call_tool(
                 "update_cart",
                 {"selectedAddressId": address_id, "items": updates},
@@ -616,10 +697,26 @@ class InstamartProvider(GroceryProvider):
             remaining = cart_items_from_instamart(
                 await self.transport.call_tool("get_cart")
             )
-            if remaining:
+            mismatched = {
+                spin_id: quantity
+                for spin_id, quantity in expected.items()
+                if remaining.get(spin_id, 0) != quantity
+            }
+            if mismatched:
                 raise ProviderError(
-                    "Instamart still reports items after clearing; review the cart in Swiggy."
+                    "Instamart cleanup could not restore the comparison quantities; "
+                    "review the cart in Swiggy."
                 )
+            self._operation_additions.pop(operation_id, None)
+            self._applied_operations.discard(operation_id)
+
+    async def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            search=True,
+            cart_read=True,
+            cart_add=True,
+            operation_cleanup=True,
+        )
 
     async def close(self) -> None:
         return None

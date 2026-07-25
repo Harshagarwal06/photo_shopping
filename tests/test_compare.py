@@ -61,6 +61,22 @@ def test_short_packs_demote_below_full_coverage():
     assert report.winner == "blinkit"
 
 
+def test_oversized_pack_outside_approved_range_is_disclosed():
+    product = _product("2 kg")
+    draft = _draft_with_item(1, "kg", product)
+
+    outcome = build_outcome(
+        "blinkit",
+        "Blinkit",
+        draft,
+        _summary("blinkit", 75.0),
+        _settings(),
+    )
+
+    assert outcome.partial_items == ["atta"]
+    assert "200%" in outcome.substitutions[0].reason
+
+
 def test_partial_still_beats_missing():
     report = rank(
         [

@@ -50,6 +50,10 @@ async def run_comparison(
     providers: dict[str, GroceryProvider],
     settings: Settings,
     on_event: EventSink = None,
+    *,
+    force_estimated: bool = False,
+    operation_id: str | None = None,
+    draft_sink: dict[str, DraftCart] | None = None,
 ) -> ComparisonReport:
     """Build the same basket everywhere and rank the resulting real totals."""
     # 1. Search every platform concurrently.
@@ -96,13 +100,15 @@ async def run_comparison(
             provider_id=provider_id,
             provider_name=providers[provider_id].display_name,
         )
+    if draft_sink is not None:
+        draft_sink.update(drafts)
 
     # 3. Build each cart and read its real total, concurrently.
     async def settle(provider_id: str) -> tuple[str, CartSummary | None, str]:
         provider = providers[provider_id]
         draft = drafts[provider_id]
         try:
-            if not settings.cart_mutations_allowed_for(provider_id):
+            if force_estimated or not settings.cart_mutations_allowed_for(provider_id):
                 return provider_id, estimated_summary(provider_id, draft), ""
             selections = [
                 (product, item.units_to_add)
@@ -113,7 +119,13 @@ async def run_comparison(
             ]
             _emit(on_event, "cart", f"Building the {provider.display_name} cart…",
                   provider_id)
-            await provider.add_items(selections, operation_id=draft.id)
+            add_results = await provider.add_items(
+                selections,
+                operation_id=operation_id or draft.id,
+            )
+            failed = [result.message for result in add_results if not result.success]
+            if failed:
+                raise RuntimeError("; ".join(failed))
             return provider_id, await provider.cart_summary(), ""
         except Exception as exc:
             return provider_id, None, str(exc) or exc.__class__.__name__

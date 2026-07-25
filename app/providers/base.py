@@ -5,7 +5,14 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from ..models import AddResult, CartLine, CartSummary, FeeLine, Product
+from ..models import (
+    AddResult,
+    CartLine,
+    CartSummary,
+    FeeLine,
+    Product,
+    ProviderCapabilities,
+)
 
 
 class ProviderError(RuntimeError):
@@ -87,6 +94,9 @@ class GroceryProvider(ABC):
 
     async def clear_cart(self, *, operation_id: str) -> None:
         raise ProviderError(f"{self.display_name} cannot clear its cart yet.")
+
+    async def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(search=True)
 
     @abstractmethod
     async def close(self) -> None:

@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     safety_lock: bool = True
     auto_add_to_cart: bool = False
     checkout_disabled: bool = True
+    blinkit_cart_writes: bool = False
     instamart_cart_writes: bool = False
     instamart_mcp_url: str = "https://mcp.swiggy.com/im"
     swiggy_oauth_base_url: str = "https://mcp.swiggy.com"
@@ -46,7 +47,9 @@ class Settings(BaseSettings):
     zepto_profile_dir: Path = ROOT / "browser_profile_zepto"
     zepto_cart_writes: bool = False
     min_fill_ratio: float = Field(default=0.9, gt=0, le=1)
+    max_fill_ratio: float = Field(default=1.1, ge=1)
     eta_tiebreak_rupees: float = Field(default=20.0, ge=0)
+    comparison_confirmation_ttl_seconds: int = Field(default=300, ge=30, le=1800)
     order_history_limit: int = Field(default=5, ge=0, le=20)
     search_result_limit: int = Field(default=5, ge=1, le=10)
     navigation_timeout_ms: int = Field(default=30_000, ge=5_000)
@@ -68,10 +71,11 @@ class Settings(BaseSettings):
         """Fail closed unless global and provider-specific guards permit writes."""
         base_allowed = not self.safety_lock and not self.dry_run and not self.demo_mode
         provider_gates = {
+            "blinkit": self.blinkit_cart_writes,
             "instamart": self.instamart_cart_writes,
             "zepto": self.zepto_cart_writes,
         }
-        return base_allowed and provider_gates.get(provider_id, True)
+        return base_allowed and provider_gates.get(provider_id, False)
 
 
 @lru_cache

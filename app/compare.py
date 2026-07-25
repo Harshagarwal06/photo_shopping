@@ -95,15 +95,20 @@ def build_outcome(
             # quantity was never actually checked.
             unverified.append(label)
             matched += 1
-        elif ratio < settings.min_fill_ratio:
+        elif ratio < settings.min_fill_ratio or ratio > settings.max_fill_ratio:
             partial.append(label)
             unit_price = per_unit_price(product, item.units_to_add)
+            direction = "only " if ratio < settings.min_fill_ratio else ""
             substitutions.append(
                 Substitution(
                     item=label,
                     requested=f"{item.planned.quantity:g} {item.planned.unit}",
                     supplied=f"{item.units_to_add} × {product.pack_size or product.name}",
-                    reason=f"Supplies only {ratio:.0%} of the requested amount.",
+                    reason=(
+                        f"Supplies {direction}{ratio:.0%} of the requested amount; "
+                        f"the approved range is {settings.min_fill_ratio:.0%}–"
+                        f"{settings.max_fill_ratio:.0%}."
+                    ),
                     per_unit_delta=unit_price[0] if unit_price else None,
                 )
             )

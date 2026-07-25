@@ -4,28 +4,31 @@ from app.models import CartConstraints
 from app.providers.factory import create_providers
 
 
-def test_blinkit_and_instamart_are_created_side_by_side():
+def test_all_three_providers_are_created_side_by_side():
     settings = Settings(_env_file=None, grocery_provider="blinkit")
 
     providers = create_providers(settings)
 
-    assert set(providers) == {"blinkit", "instamart"}
+    assert set(providers) == {"blinkit", "instamart", "zepto"}
     assert providers["blinkit"].display_name == "Blinkit"
     assert providers["instamart"].display_name == "Swiggy Instamart"
+    assert providers["zepto"].display_name == "Zepto"
 
 
-def test_provider_specific_cart_guards_do_not_disable_blinkit():
+def test_provider_specific_cart_guards_fail_closed_independently():
     settings = Settings(
         _env_file=None,
         grocery_provider="blinkit",
         dry_run=False,
         safety_lock=False,
         demo_mode=False,
+        blinkit_cart_writes=True,
         instamart_cart_writes=False,
     )
 
     assert settings.cart_mutations_allowed_for("blinkit") is True
     assert settings.cart_mutations_allowed_for("instamart") is False
+    assert settings.cart_mutations_allowed_for("zepto") is False
 
 
 def test_draft_keeps_the_provider_that_created_it():

@@ -11,7 +11,7 @@ from .llm import HFModelClient, ModelBackendError
 from .models import CrossPlatformMatch, MatchDecision, PlannedItem, Product
 
 
-MATCHER_SYSTEM = """You rank real Blinkit product candidates for one planned grocery item.
+MATCHER_SYSTEM = """You rank real grocery product candidates for one planned grocery item.
 Return only a JSON object with product_id, units_to_add, and reason. Choose only an in-stock
 candidate id from the supplied list. Respect the item's context and requested measurement.
 Compute purchasable units, not loose quantity: 12 eggs means one 12-count tray, not 12 trays;
@@ -145,7 +145,11 @@ def match_product(
     settings: Settings,
 ) -> MatchDecision:
     if not candidates:
-        return MatchDecision(product_id=None, units_to_add=0, reason="Blinkit returned no results.")
+        return MatchDecision(
+            product_id=None,
+            units_to_add=0,
+            reason="The selected grocery provider returned no results.",
+        )
     if settings.demo_mode or settings.safety_lock or settings.model_backend == "local":
         return _fallback_match(item, candidates)
 

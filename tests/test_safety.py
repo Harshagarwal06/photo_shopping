@@ -35,6 +35,18 @@ def test_safety_lock_blocks_cart_clicks_even_when_dry_run_is_off():
     assert "no Blinkit button was clicked" in result.message
 
 
+def test_blinkit_cart_writes_require_provider_specific_opt_in():
+    settings = Settings(
+        _env_file=None,
+        dry_run=False,
+        demo_mode=False,
+        safety_lock=False,
+        blinkit_cart_writes=False,
+    )
+
+    assert settings.cart_mutations_allowed_for("blinkit") is False
+
+
 def test_client_has_no_checkout_or_order_placement_action():
     client = BlinkitClient(Settings(_env_file=None))
 
