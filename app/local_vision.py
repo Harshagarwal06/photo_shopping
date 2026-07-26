@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import difflib
 import re
 import subprocess
 import tempfile
+from itertools import product
 from pathlib import Path
 
 from .llm import ModelBackendError
@@ -147,6 +149,72 @@ def _normalise_unit(unit: str | None, *, had_quantity: bool) -> str:
     return UNIT_ALIASES.get(lowered, lowered)
 
 
+# Products the catalogues already name correctly. Listing them stops the fuzzy
+# pass below from dragging a good word onto a lexicon entry: "paneer" scores 0.8
+# against "pani", which would order water.
+RETAIL_TERMS = frozenset(
+    {
+        "atta", "besan", "bhindi", "chana", "coffee", "dal", "ghee", "gobi",
+        "jaggery", "kaju", "maida", "maggi", "methi", "moong", "murmura",
+        "paneer", "poha", "rajma", "rava", "sooji", "suji", "toor", "upma",
+    }
+)
+# Every spelling the parser treats as already correct: lexicon keys, what they
+# resolve to, and the retail terms above. Sorted so difflib breaks ties the same
+# way on every run regardless of hash seed.
+KNOWN_TERMS = tuple(sorted(set(TERM_ALIASES) | set(TERM_ALIASES.values()) | RETAIL_TERMS))
+# Characters Vision most often confuses on handwriting, each mapped to what it
+# was probably meant to be. Substituting and testing for an exact match resolves
+# "0nion" without the loose fuzzy threshold that would also break "paneer".
+OCR_CONFUSIONS = {
+    "0": ("o",),
+    "1": ("l", "i"),
+    "5": ("s",),
+    "8": ("b",),
+    "|": ("l", "i"),
+}
+MAX_CONFUSION_VARIANTS = 8
+# 0.85 is deliberately tight. At 0.8, "paneer"/"pani" and "0nion"/"onion" score
+# identically, so no threshold separates them — hence OCR_CONFUSIONS.
+FUZZY_CUTOFF = 0.85
+# Short words collide too easily: "tea" and "tel" (oil) are one edit apart.
+MIN_FUZZY_LENGTH = 5
+
+
+def _confusion_variants(token: str) -> list[str]:
+    """Spellings of a token with likely OCR character confusions undone."""
+    variants: list[str] = []
+    if "rn" in token:
+        variants.append(token.replace("rn", "m"))
+    choices = [OCR_CONFUSIONS.get(char, (char,)) for char in token]
+    total = 1
+    for choice in choices:
+        total *= len(choice)
+    # No lower bound: an unambiguous swap such as "0" -> "o" yields exactly one
+    # combination, and the identity spelling is filtered out on the way back.
+    if total <= MAX_CONFUSION_VARIANTS:
+        variants.extend("".join(combination) for combination in product(*choices))
+    return [variant for variant in variants if variant != token]
+
+
+def _resolve_term(token: str) -> str:
+    """Map one word onto a searchable term, undoing misreads where it is safe."""
+    if token in TERM_ALIASES:
+        return TERM_ALIASES[token]
+    if token in KNOWN_TERMS:
+        return token
+    for variant in _confusion_variants(token):
+        if variant in TERM_ALIASES:
+            return TERM_ALIASES[variant]
+        if variant in KNOWN_TERMS:
+            return variant
+    if len(token) >= MIN_FUZZY_LENGTH:
+        close = difflib.get_close_matches(token, KNOWN_TERMS, n=1, cutoff=FUZZY_CUTOFF)
+        if close:
+            return TERM_ALIASES.get(close[0], close[0])
+    return token
+
+
 def _parse_quantity(raw: str) -> float | None:
     """Read "2", "2.5", "1/2", "½", or "1½". None when the text cannot be a count."""
     value = raw.strip()
@@ -166,7 +234,18 @@ def _parse_quantity(raw: str) -> float | None:
 def _clean_name(name: str) -> str:
     cleaned = re.sub(r"\b(?:please|get|buy|need|add)\b", " ", name, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" .:-")
-    return TERM_ALIASES.get(cleaned.lower(), cleaned)
+    # The whole phrase first, so multi-word entries such as "chai patti" resolve
+    # as one term rather than word by word.
+    whole = TERM_ALIASES.get(cleaned.lower())
+    if whole is not None:
+        return whole
+    words = cleaned.split()
+    resolved = [_resolve_term(word.lower()) for word in words]
+    # Casing is the user's until a word is actually rewritten.
+    return " ".join(
+        original if resolved_word == original.lower() else resolved_word
+        for original, resolved_word in zip(words, resolved)
+    )
 
 
 def _parse_item(raw: str, source: str) -> PlannedItem | None:

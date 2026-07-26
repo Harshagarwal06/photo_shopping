@@ -18,7 +18,8 @@ from app.local_vision import _parse_item, plan_locally
         ("packet bread", "bread", 1, "pack"),
         # Fractions, written both ways.
         ("1/2 kg paneer", "paneer", 0.5, "kg"),
-        ("½ kg tomatoes", "tomatoes", 0.5, "kg"),
+        # "tomatoes" singularises onto the lexicon term; see the fuzzy tests below.
+        ("½ kg tomatoes", "tomato", 0.5, "kg"),
         ("1½ kg atta", "atta", 1.5, "kg"),
         ("3/4 l milk", "milk", 0.75, "l"),
         # A decimal is not a numbered-list marker: "2." must not be stripped.
@@ -85,6 +86,52 @@ def test_retail_hindi_names_are_not_translated(line):
     expected = line.split()[0]
 
     assert _parse_item(line, "photo").search_term == expected
+
+
+@pytest.mark.parametrize(
+    ("line", "term"),
+    [
+        # Character confusions, undone by exact match on a corrected spelling.
+        ("5 kg 0nion", "onion"),
+        ("2 kg 0ni0n", "onion"),
+        ("rnilk 2 l", "milk"),
+        ("1 kg a10o", "potato"),
+        ("hald1", "turmeric"),
+        # Genuine near-misses, caught by the fuzzy pass.
+        ("tomatoe 1 kg", "tomato"),
+        ("corriander", "coriander"),
+        ("½ kg tomatoes", "tomato"),
+        # A lexicon word inside a longer phrase, resolved token by token.
+        ("fresh dhaniya", "fresh coriander"),
+        ("2 kg desi pyaz", "desi onion"),
+    ],
+)
+def test_misread_terms_resolve(line, term):
+    assert _parse_item(line, "photo").search_term == term
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        # "paneer" scores 0.8 against "pani" (water) and "pen" is close to several
+        # short terms. Anything already known must never be rewritten.
+        "paneer",
+        "pen",
+        "black pen",
+        "Coke Can",
+        "Water Bottle",
+        "Coffee",
+        "besan",
+        "bhindi",
+        "dal",
+        "ghee",
+        "toor dal",
+        "Amul Butter",
+        "tea",
+    ],
+)
+def test_known_and_unknown_words_are_never_fuzzed_onto_something_else(line):
+    assert _parse_item(line, "photo").search_term == line
 
 
 @pytest.mark.parametrize("line", ["1/0 kg broken", "0 kg nothing"])
