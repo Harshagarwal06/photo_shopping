@@ -134,6 +134,42 @@ def test_known_and_unknown_words_are_never_fuzzed_onto_something_else(line):
     assert _parse_item(line, "photo").search_term == line
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Grocery list",
+        "• Crocery list.",  # the "G" misread, as photographed
+        "Shopping list:",
+        "sabzi list",
+    ],
+)
+def test_a_list_heading_is_not_a_product(line):
+    """Blinkit will happily sell something for "grocery list" if it is searched."""
+    assert _parse_item(line, "photo") is None
+
+
+@pytest.mark.parametrize(
+    ("line", "term"),
+    [
+        ("Jecra", "cumin"),  # jeera, the "e" read as "c"
+        ("Panees", "paneer"),  # paneer, the "r" read as "s"
+        ("rnethi", "methi"),
+        ("dhanlya", "coriander"),
+    ],
+)
+def test_letter_shape_confusions_resolve(line, term):
+    assert _parse_item(line, "photo").search_term == term
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["Dalcheeni", "Pads", "Tide detergent", "Barbecue sauce", "ID Dosa batter", "maggi"],
+)
+def test_single_letter_swaps_do_not_capture_ordinary_products(line):
+    """Dalcheeni is cinnamon; one letter from "cheeni" it would become sugar."""
+    assert _parse_item(line, "photo").search_term == line
+
+
 @pytest.mark.parametrize("line", ["1/0 kg broken", "0 kg nothing"])
 def test_unusable_quantity_falls_back_instead_of_raising(line):
     """A zero denominator must not divide by zero, and 0 fails PlannedItem's gt=0."""

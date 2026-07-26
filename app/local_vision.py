@@ -173,6 +173,18 @@ OCR_CONFUSIONS = {
     "8": ("b",),
     "|": ("l", "i"),
 }
+# Letter pairs handwriting blurs: "Jeera" read as "Jecra", "Paneer" as "Panees".
+# Applied one at a time, unlike the digit swaps above, because a word with five
+# confusable letters would otherwise generate dozens of spellings. One misread
+# letter per word covers the overwhelming majority and keeps the search exact.
+LETTER_CONFUSIONS = {
+    "c": "e", "e": "c", "s": "r", "r": "s", "n": "h", "h": "n",
+    "u": "v", "v": "u", "o": "a", "a": "o", "i": "l", "l": "i",
+    "g": "q", "q": "g", "m": "n",
+}
+# A photographed list often starts with a title. Without this it is searched for
+# as though it were a product, and Blinkit obligingly sells something.
+HEADER_RE = re.compile(r"^(?:\w+\W+){0,2}lists?\W*$", re.IGNORECASE)
 MAX_CONFUSION_VARIANTS = 8
 # 0.85 is deliberately tight. At 0.8, "paneer"/"pani" and "0nion"/"onion" score
 # identically, so no threshold separates them — hence OCR_CONFUSIONS.
@@ -194,6 +206,10 @@ def _confusion_variants(token: str) -> list[str]:
     # combination, and the identity spelling is filtered out on the way back.
     if total <= MAX_CONFUSION_VARIANTS:
         variants.extend("".join(combination) for combination in product(*choices))
+    for index, char in enumerate(token):
+        swap = LETTER_CONFUSIONS.get(char)
+        if swap:
+            variants.append(f"{token[:index]}{swap}{token[index + 1:]}")
     return [variant for variant in variants if variant != token]
 
 
@@ -253,7 +269,7 @@ def _parse_item(raw: str, source: str) -> PlannedItem | None:
     # loses its "2." and becomes five kilos.
     value = re.sub(r"^\s*(?:[-*•]\s*|\d+[.)]\s+)", "", raw).strip()
     value = BUDGET_RE.sub("", value).strip(" ,.-")
-    if not value:
+    if not value or HEADER_RE.match(value):
         return None
     value = IMPLICIT_SINGLE_RE.sub("1 ", value)
 
