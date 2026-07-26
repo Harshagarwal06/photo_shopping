@@ -20,7 +20,10 @@ FRACTION_CHARS = "".join(VULGAR_FRACTIONS)
 QUANTITY_PATTERN = (
     rf"\d+\s*[{FRACTION_CHARS}]|[{FRACTION_CHARS}]|\d+\s*/\s*\d+|\d+(?:\.\d+)?"
 )
-UNIT_PATTERN = r"kg|g|gm|l|ltr|ml|pcs?|pieces?|count|dozens?|packets?|packs?"
+UNIT_PATTERN = (
+    r"kg|g|gm|l|ltr|ml|pcs?|pieces?|count|dozens?|packets?|packs?"
+    r"|bottles?|tins?|cans?"
+)
 LEADING_QUANTITY_RE = re.compile(
     rf"^(?P<quantity>{QUANTITY_PATTERN})\s*(?P<unit>{UNIT_PATTERN})?\s+(?P<name>.+)$",
     re.IGNORECASE,
@@ -31,7 +34,9 @@ TRAILING_QUANTITY_RE = re.compile(
 )
 # "dozen eggs" means one dozen. Restricted to container words on purpose: letting
 # a bare "l" or "g" imply a quantity would rewrite ordinary product names.
-IMPLICIT_SINGLE_RE = re.compile(r"^(?=(?:dozens?|packets?|packs?)\b)", re.IGNORECASE)
+IMPLICIT_SINGLE_RE = re.compile(
+    r"^(?=(?:dozens?|packets?|packs?|bottles?|tins?)\b)", re.IGNORECASE
+)
 UNIT_ALIASES = {
     "gm": "g",
     "ltr": "l",
@@ -44,12 +49,67 @@ UNIT_ALIASES = {
     "packet": "pack",
     "packets": "pack",
     "dozens": "dozen",
+    # Containers all normalise to "pack": constraints.units_for_candidate only
+    # multiplies the requested count for "pack", so a unit name of its own would
+    # silently turn "2 bottles" into one.
+    "bottle": "pack",
+    "bottles": "pack",
+    "tin": "pack",
+    "tins": "pack",
+    "can": "pack",
+    "cans": "pack",
 }
+# Hinglish and common misspellings mapped to the term most likely to match a
+# product listing. Deliberately conservative: a word is translated only where the
+# English one is the label Indian grocery apps actually use. Terms that are
+# themselves the retail name — paneer, atta, besan, ghee, dal, bhindi, maida —
+# are left alone or only spelling-normalised, because translating them ("okra",
+# "clarified butter") searches for something the catalogue does not call it.
 TERM_ALIASES = {
+    # dairy and eggs
     "doodh": "milk",
     "dudh": "milk",
     "ande": "eggs",
     "anda": "eggs",
+    "andey": "eggs",
+    "dahi": "curd",
+    "makhan": "butter",
+    "makkhan": "butter",
+    # staples
+    "chawal": "rice",
+    "chaval": "rice",
+    "aata": "atta",
+    "sooji": "suji",
+    "cheeni": "sugar",
+    "chini": "sugar",
+    "shakkar": "sugar",
+    "namak": "salt",
+    "tel": "oil",
+    "paani": "water",
+    "pani": "water",
+    # vegetables
+    "pyaz": "onion",
+    "pyaaz": "onion",
+    "kanda": "onion",
+    "aloo": "potato",
+    "alu": "potato",
+    "tamatar": "tomato",
+    "tamaatar": "tomato",
+    "gajar": "carrot",
+    "adrak": "ginger",
+    "lehsun": "garlic",
+    "lahsun": "garlic",
+    # spices and staples of the masala dabba
+    "haldi": "turmeric",
+    "jeera": "cumin",
+    "dhaniya": "coriander",
+    "dhania": "coriander",
+    "mirch": "chilli",
+    "mirchi": "chilli",
+    # everything else
+    "chai": "tea",
+    "chai patti": "tea",
+    "sabun": "soap",
 }
 
 

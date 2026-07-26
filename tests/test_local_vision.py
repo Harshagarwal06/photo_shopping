@@ -33,6 +33,60 @@ def test_parses_dozens_packets_and_fractions(line, term, quantity, unit):
     assert (item.search_term, item.quantity, item.unit) == (term, quantity, unit)
 
 
+@pytest.mark.parametrize(
+    ("line", "term", "quantity", "unit"),
+    [
+        ("2 bottle oil", "oil", 2, "pack"),
+        ("bottle oil", "oil", 1, "pack"),
+        ("1 tin ghee", "ghee", 1, "pack"),
+        ("6 can coke", "coke", 6, "pack"),
+    ],
+)
+def test_container_units_normalise_to_pack(line, term, quantity, unit):
+    """Containers must map onto "pack": it is the only unit whose requested count
+    constraints.units_for_candidate multiplies."""
+    item = _parse_item(line, "photo")
+
+    assert (item.search_term, item.quantity, item.unit) == (term, quantity, unit)
+
+
+@pytest.mark.parametrize("line", ["Coke Can", "Water Bottle", "can opener"])
+def test_container_words_inside_a_product_name_are_left_alone(line):
+    """A container word only counts when a quantity or line start marks it as one.
+
+    "can" is excluded from the implicit-one rewrite because, unlike "bottle" or
+    "tin", it is an ordinary English verb.
+    """
+    item = _parse_item(line, "photo")
+
+    assert (item.search_term, item.quantity, item.unit) == (line, 1, "item")
+
+
+@pytest.mark.parametrize(
+    ("line", "term"),
+    [
+        ("2 kg pyaz", "onion"),
+        ("aloo 1 kg", "potato"),
+        ("dahi 400gm", "curd"),
+        ("1/2 kg tamatar", "tomato"),
+        ("2 packet jeera", "cumin"),
+        ("chai patti", "tea"),
+        ("haldi", "turmeric"),
+    ],
+)
+def test_hinglish_terms_resolve_to_searchable_names(line, term):
+    assert _parse_item(line, "photo").search_term == term
+
+
+@pytest.mark.parametrize("line", ["paneer 200gm", "besan 1 packet", "bhindi 500g"])
+def test_retail_hindi_names_are_not_translated(line):
+    """These are what the catalogues call them; "okra" would search for a word
+    the listings do not use."""
+    expected = line.split()[0]
+
+    assert _parse_item(line, "photo").search_term == expected
+
+
 @pytest.mark.parametrize("line", ["1/0 kg broken", "0 kg nothing"])
 def test_unusable_quantity_falls_back_instead_of_raising(line):
     """A zero denominator must not divide by zero, and 0 fails PlannedItem's gt=0."""
