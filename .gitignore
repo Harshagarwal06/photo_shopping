@@ -10,3 +10,6 @@ browser_profile_zepto/
 
 # Subagent-driven-development scratch (ledger, briefs, review packages)
 .superpowers/
+
+# Output of tools/ranking_corpus.py report
+ranking_picks.json
