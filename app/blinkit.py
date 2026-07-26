@@ -34,6 +34,19 @@ def _looks_like_profile_conflict(message: str) -> bool:
     )
 
 
+# Blinkit answers roughly the seventh rapid search in a session with a shell page:
+# correct URL and title, readyState complete, but no product markup at all and a
+# body of about seventeen characters. It recovers within seconds. Measured: the
+# first six searches succeed in ~1.2s each, then five consecutive empties, then
+# success again. An empty scrape is therefore throttling, not an empty catalogue
+# — Blinkit answers even nonsense queries with fallback products.
+# Spacing the requests is what actually avoids the limit; retrying alone does not,
+# because each retry is another request against the same window. Measured over
+# twelve consecutive searches: back to back, six succeed and five fail; with this
+# gap, twelve of twelve succeed.
+MIN_SEARCH_INTERVAL_S = 2.5
+SEARCH_RETRY_DELAYS_MS = (0, 4_000, 8_000)
+
 PRICE_RE = re.compile(r"₹\s*([\d,]+(?:\.\d{1,2})?)")
 PACK_RE = re.compile(
     r"\b(?:\d+\s*x\s*)?\d+(?:\.\d+)?\s*(?:kg|g|gm|l|ltr|ml|pcs?|pieces?|count|packs?)\b",
@@ -253,6 +266,7 @@ class BlinkitClient:
         self._lock = asyncio.Lock()
         self._cleanup_registered = False
         self._order_history: Counter[str] | None = None
+        self._last_search_at = 0.0
 
     async def _open_persistent_context(self) -> BrowserContext:
         assert self._playwright is not None
@@ -494,19 +508,44 @@ class BlinkitClient:
         async with self._lock:
             page = await self._get_page()
             history = await self._get_order_history(page)
-            url = f"{self.settings.blinkit_base_url}/s/?q={quote_plus(query)}"
-            await page.goto(url, wait_until="domcontentloaded")
-            try:
-                await page.wait_for_selector(
-                    'a[href*="/prn/"], [data-testid*="product"], '
-                    '[role="button"][data-pf="reset"] img[src*="/cms-assets/cms/product/"]',
-                    timeout=12_000,
-                )
-            except Exception:
-                # The result page may legitimately be empty; inspect what is present.
-                pass
-            raw_products = await page.evaluate(
-                """(limit) => {
+            for delay_ms in SEARCH_RETRY_DELAYS_MS:
+                if delay_ms:
+                    await page.wait_for_timeout(delay_ms)
+                raw_products = await self._scrape_search(page, query)
+                if raw_products:
+                    return _products_from_raw(
+                        query,
+                        raw_products,
+                        self.settings.search_result_limit,
+                        history=history,
+                        base_url=self.settings.blinkit_base_url,
+                    )
+            raise BlinkitError(
+                f"Blinkit returned an empty page for “{query}” on "
+                f"{len(SEARCH_RETRY_DELAYS_MS)} attempts, which is how it responds to "
+                "rapid searching. Wait a minute and try again."
+            )
+
+    async def _scrape_search(self, page: Page, query: str) -> list[dict]:
+        """Run one search and return the raw product rows found on the page."""
+        gap = MIN_SEARCH_INTERVAL_S - (time.monotonic() - self._last_search_at)
+        if gap > 0:
+            await page.wait_for_timeout(gap * 1_000)
+        self._last_search_at = time.monotonic()
+        url = f"{self.settings.blinkit_base_url}/s/?q={quote_plus(query)}"
+        await page.goto(url, wait_until="domcontentloaded")
+        try:
+            await page.wait_for_selector(
+                'a[href*="/prn/"], [data-testid*="product"], '
+                '[role="button"][data-pf="reset"] img[src*="/cms-assets/cms/product/"]',
+                timeout=12_000,
+            )
+        except Exception:
+            # Blinkit serves a shell with no product markup when it is throttling;
+            # the caller retries rather than reporting the products as missing.
+            pass
+        return await page.evaluate(
+            """(limit) => {
                   const links = [...document.querySelectorAll('a[href*="/prn/"]')];
                   const modernRoots = [
                     ...new Set(
@@ -552,15 +591,8 @@ class BlinkitClient:
                   }
                   return out;
                 }""",
-                self.settings.search_result_limit,
-            )
-            return _products_from_raw(
-                query,
-                raw_products,
-                self.settings.search_result_limit,
-                history=history,
-                base_url=self.settings.blinkit_base_url,
-            )
+            self.settings.search_result_limit,
+        )
 
     async def add_to_cart(self, product: Product, qty: int) -> AddResult:
         if qty < 1:
