@@ -112,6 +112,8 @@ for line in ordered {
         (first.confidence, first.text.count) < (second.confidence, second.text.count)
     }
     if let best {
-        print(best.text)
+        // Confidence first, tab separated: the caller drops readings too poor to
+        // shop from, and says how many it dropped.
+        print("\(best.confidence)\t\(best.text)")
     }
 }

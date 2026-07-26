@@ -281,8 +281,8 @@ def test_unusable_quantity_falls_back_instead_of_raising(line):
 
 def test_local_planner_combines_typed_and_recognized_items(monkeypatch):
     monkeypatch.setattr(
-        "app.local_vision.recognize_text",
-        lambda _bytes, _media_type: "12 eggs\nrice 2 kg",
+        "app.local_vision.recognize_lines",
+        lambda _bytes, _media_type: [(1.0, "12 eggs"), (1.0, "rice 2 kg")],
     )
 
     plan = plan_locally(
@@ -295,3 +295,21 @@ def test_local_planner_combines_typed_and_recognized_items(monkeypatch):
     assert [item.quantity for item in plan.items] == [2, 12, 2]
     assert plan.constraints.cart_budget == 800
     assert "locally on this Mac" in plan.processing_note
+
+
+def test_unreadable_lines_are_skipped_and_disclosed(monkeypatch):
+    """An illegible line is read as a confident wrong word and becomes a real
+    product, so it is dropped — but never silently."""
+    monkeypatch.setattr(
+        "app.local_vision.recognize_lines",
+        lambda _bytes, _media_type: [
+            (1.0, "milk 2 l"),
+            (0.3, "Leach ba to gara"),
+            (0.3, "aditate:"),
+        ],
+    )
+
+    plan = plan_locally(text="", image_bytes=b"image", image_media_type="image/jpeg")
+
+    assert [item.search_term for item in plan.items] == ["milk"]
+    assert "2 lines could not be read clearly" in plan.processing_note

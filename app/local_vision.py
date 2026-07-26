@@ -12,6 +12,13 @@ from .models import CartConstraints, CartPlan, PlannedItem
 
 
 VISION_SCRIPT = Path(__file__).with_name("vision_ocr.swift")
+# Illegible writing is read as confidently-wrong words, and those become real
+# products: two 0.3-confidence lines of one photographed list matched face bleach
+# and craft paper. Every line that was actually a grocery item on the same page
+# scored 0.5 or higher, and a clean block-capitals list scores 1.0 throughout.
+# A missing item the user can add back beats a wrong item in the cart, and the
+# count of skipped lines is reported rather than hidden.
+MIN_LINE_CONFIDENCE = 0.4
 BUDGET_RE = re.compile(
     r"\b(?:under|below|budget(?:\s+of)?|up\s*to|upto)\s*₹?\s*([\d,]+(?:\.\d+)?)",
     re.IGNORECASE,
@@ -121,7 +128,32 @@ TERM_ALIASES = {
 }
 
 
+def recognize_lines(image_bytes: bytes, image_media_type: str) -> list[tuple[float, str]]:
+    """Every line the OCR read, each with the confidence it was read at."""
+    lines: list[tuple[float, str]] = []
+    for row in _run_vision(image_bytes, image_media_type).splitlines():
+        confidence, _, text = row.partition("\t")
+        text = text.strip()
+        if not text:
+            continue
+        try:
+            lines.append((float(confidence), text))
+        except ValueError:
+            # A line without the prefix is still a line; trust it rather than lose it.
+            lines.append((1.0, row.strip()))
+    return lines
+
+
 def recognize_text(image_bytes: bytes, image_media_type: str) -> str:
+    """The readable lines of the image, one per line."""
+    return "\n".join(
+        text
+        for confidence, text in recognize_lines(image_bytes, image_media_type)
+        if confidence >= MIN_LINE_CONFIDENCE
+    )
+
+
+def _run_vision(image_bytes: bytes, image_media_type: str) -> str:
     suffix = {
         "image/jpeg": ".jpg",
         "image/png": ".png",
@@ -389,7 +421,10 @@ def plan_locally(
     image_bytes: bytes | None,
     image_media_type: str,
 ) -> CartPlan:
-    photo_text = recognize_text(image_bytes, image_media_type) if image_bytes else ""
+    photo_lines = recognize_lines(image_bytes, image_media_type) if image_bytes else []
+    readable = [text_ for score, text_ in photo_lines if score >= MIN_LINE_CONFIDENCE]
+    skipped = len(photo_lines) - len(readable)
+    photo_text = "\n".join(readable)
     origin = "both" if text.strip() and photo_text else "photo" if photo_text else "text"
     combined = "\n".join(part for part in (text.strip(), photo_text) if part)
     budget_match = BUDGET_RE.search(combined)
@@ -415,6 +450,11 @@ def plan_locally(
         if image_bytes
         else "Processed locally on this Mac."
     )
+    if skipped:
+        note += (
+            f" {skipped} line{'s' if skipped != 1 else ''} could not be read clearly "
+            "and were left out; add them by hand if the list looks short."
+        )
     return CartPlan(
         items=items,
         constraints=CartConstraints(cart_budget=budget),

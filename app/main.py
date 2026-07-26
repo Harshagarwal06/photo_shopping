@@ -262,22 +262,46 @@ async def create_draft_stream(
                         ),
                     )
                 )
-                candidates = await draft_provider.search(planned.search_term)
+                # One provider failure must not discard the items already searched:
+                # the rest of the list is still worth reviewing, and the failure is
+                # reported on its own item rather than as an empty result.
+                search_error = ""
+                try:
+                    candidates = await draft_provider.search(planned.search_term)
+                except ProviderError as exc:
+                    candidates = []
+                    search_error = str(exc) or exc.__class__.__name__
                 yield encode_event(
                     StreamEvent(
                         event="stage",
                         stage="matcher",
-                        message=f"Comparing {len(candidates)} result{'s' if len(candidates) != 1 else ''} for {planned.search_term}…",
+                        message=(
+                            f"{draft_provider.display_name} could not search for {planned.search_term}."
+                            if search_error
+                            else f"Comparing {len(candidates)} result{'s' if len(candidates) != 1 else ''} for {planned.search_term}…"
+                        ),
                     )
                 )
-                decision = await asyncio.to_thread(match_product, planned, candidates, settings)
-                draft_item = DraftItem(
-                    planned=planned,
-                    candidates=candidates,
-                    selected_product_id=decision.product_id,
-                    units_to_add=decision.units_to_add,
-                    reason=decision.reason,
-                )
+                if search_error:
+                    draft_item = DraftItem(
+                        planned=planned,
+                        candidates=[],
+                        selected_product_id=None,
+                        units_to_add=0,
+                        reason=search_error,
+                        flags=[f"{draft_provider.display_name} search failed: {search_error}"],
+                    )
+                else:
+                    decision = await asyncio.to_thread(
+                        match_product, planned, candidates, settings
+                    )
+                    draft_item = DraftItem(
+                        planned=planned,
+                        candidates=candidates,
+                        selected_product_id=decision.product_id,
+                        units_to_add=decision.units_to_add,
+                        reason=decision.reason,
+                    )
                 draft_items.append(draft_item)
                 yield encode_event(
                     StreamEvent(
