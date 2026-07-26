@@ -58,12 +58,23 @@ def _quantity_fit(item: PlannedItem, product: Product, units: int) -> tuple[floa
     return score, f"{label} is the closest pack fit"
 
 
+# The provider's own ordering knows things this scorer cannot: what people
+# actually buy for these words, what is in stock nearby, how the query relates to
+# the catalogue. It matters most exactly when our text signal is weakest — a
+# photographed "Thumbs u" matches no product name at all, leaving price to choose
+# between Thums Up and Coca-Cola. Kept below the previous-order boost (26),
+# relevance (36) and pack fit (16) so it decides ties rather than overriding a
+# genuinely better match.
+POSITION_WEIGHT = 10.0
+
+
 def _score_candidate(
     item: PlannedItem,
     product: Product,
     *,
     units: int,
     lowest_total: float,
+    position: int = 0,
 ) -> tuple[float, list[str]]:
     query_tokens = _tokens(f"{item.search_term} {item.context}")
     name_tokens = _tokens(product.name)
@@ -73,6 +84,10 @@ def _score_candidate(
     reasons: list[str] = []
     if relevance >= 0.75:
         reasons.append("strong request match")
+
+    score += POSITION_WEIGHT / (1 + position)
+    if position == 0:
+        reasons.append("the top result for this search")
 
     total = product.price * units
     if total > 0:
@@ -125,6 +140,7 @@ def _fallback_match(item: PlannedItem, candidates: list[Product]) -> MatchDecisi
             candidate,
             units=units,
             lowest_total=lowest_total,
+            position=index,
         )
         scored.append((score, -(candidate.price * units), -index, candidate, units, reasons))
     _, _, _, selected, units, reasons = max(scored, key=lambda entry: entry[:3])

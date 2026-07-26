@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from app.config import Settings
-from app.matcher import match_product
+from app.matcher import _fallback_match, match_product
 from app.models import PlannedItem, Product
 
 
@@ -96,3 +96,65 @@ def test_local_matcher_uses_ratings_and_total_price_without_fabricating_them():
 
     assert decision.product_id == "best"
     assert "4.7★" in decision.reason
+
+
+def _product(product_id: str, name: str, price: float) -> Product:
+    return Product(id=product_id, name=name, price=price, handle=product_id)
+
+
+def test_the_providers_top_result_wins_a_tie_price_would_otherwise_take():
+    """A photographed "nhite" matches neither bread, so relevance ties and the
+    cheaper loaf used to win. Blinkit ranked the right one first."""
+    item = PlannedItem(search_term="Modern nhite bread", quantity=1, unit="item")
+    # The five results Blinkit actually returned, in the order it returned them.
+    candidates = [
+        _product("white", "Modern White Bread", 45),
+        _product("wheat", "Modern 100% Whole Wheat Bread (Zero Maida)", 60),
+        _product("oven", "English Oven Sandwich White Bread", 45),
+        _product("britannia", "Britannia Vitarich Sandwich White Bread", 40),
+        _product("fruit", "Modern Fruit Bread", 28),
+    ]
+
+    decision = _fallback_match(item, candidates)
+
+    assert decision.product_id == "white"
+
+
+def test_the_providers_order_decides_when_nothing_in_the_query_matches():
+    """"Thumbs u" matches no product name at all, so every candidate scored zero
+    relevance and a ₹2 difference chose Coca-Cola over Thums Up."""
+    item = PlannedItem(search_term="Thumbs u", quantity=1, unit="item")
+    candidates = [
+        _product("thums", "Thums Up Soft Drink", 40),
+        _product("pepsi", "Pepsi Soft Drink", 40),
+        _product("coke", "Coca-Cola Soft Drink", 38),
+    ]
+
+    decision = _fallback_match(item, candidates)
+
+    assert decision.product_id == "thums"
+
+
+def test_position_does_not_override_a_genuinely_better_match():
+    """The provider's order is a prior, not the answer: a candidate that matches
+    the words must still beat whatever the provider happened to rank first."""
+    item = PlannedItem(search_term="fruit bread", quantity=1, unit="item")
+    candidates = [
+        _product("white", "Modern White Bread", 45),
+        _product("fruit", "Modern Fruit Bread", 60),
+    ]
+
+    decision = _fallback_match(item, candidates)
+
+    assert decision.product_id == "fruit"
+
+
+def test_a_previously_ordered_product_still_outranks_the_top_result():
+    item = PlannedItem(search_term="milk", quantity=1, unit="item")
+    first = _product("new", "Amul Taaza Toned Milk", 30)
+    known = _product("usual", "Mother Dairy Toned Milk", 32)
+    known.past_order_count = 6
+
+    decision = _fallback_match(item, [first, known])
+
+    assert decision.product_id == "usual"
