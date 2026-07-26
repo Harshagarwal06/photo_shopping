@@ -24,46 +24,94 @@ let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFStrin
 let orientation = (properties?[kCGImagePropertyOrientation] as? UInt32)
     .flatMap(CGImagePropertyOrientation.init) ?? .up
 
-// Handwritten strokes that nearly touch merge into one glyph at phone-photo
-// resolution: the "bl" of "black" is recognised as "H". Doubling the pixels keeps
-// the gap. 2 is deliberate — 4 regressed on the same photo, and raising contrast
-// fixed that word while corrupting another.
-let recognitionScale: CGFloat = 2
-// Rotate the pixels rather than handing the tag to Vision: the observation
-// bounding boxes below are then already in upright space, so the reading-order
-// sort stays correct. Passing the tag to the handler instead leaves the boxes in
-// the stored orientation and reverses the recognised lines.
-let prepared = CIImage(cgImage: image)
-    .oriented(orientation)
-    .transformed(by: CGAffineTransform(scaleX: recognitionScale, y: recognitionScale))
-guard let upscaled = CIContext().createCGImage(prepared, from: prepared.extent) else {
-    fputs("The uploaded image could not be prepared for recognition.\n", stderr)
-    exit(3)
+// One scale cannot read every hand. Enlarging separates strokes that merge at
+// native resolution — the "bl" of "black" is otherwise recognised as "H" — but
+// enlarging too far loses whole lines of cursive. Measured across three
+// photographed lists, each scale recovered lines the others missed, so all three
+// are read and the results merged: 17 of 31 expected terms at 2x alone, 23 when
+// merged.
+let recognitionScales: [CGFloat] = [1, 2, 4]
+let ciContext = CIContext()
+
+struct Reading {
+    let y: Double
+    let x: Double
+    let text: String
+    let confidence: Float
 }
 
-let request = VNRecognizeTextRequest()
-request.recognitionLevel = .accurate
-request.usesLanguageCorrection = true
-request.recognitionLanguages = ["en-US"]
+func readings(scale: CGFloat) -> [Reading] {
+    // Rotate the pixels rather than handing the tag to Vision: the bounding boxes
+    // are then already in upright space, so the reading-order sort below stays
+    // correct. Passing the tag to the handler instead reverses the lines.
+    let prepared = CIImage(cgImage: image)
+        .oriented(orientation)
+        .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+    guard let rendered = ciContext.createCGImage(prepared, from: prepared.extent) else {
+        return []
+    }
+    let request = VNRecognizeTextRequest()
+    request.recognitionLevel = .accurate
+    request.usesLanguageCorrection = true
+    request.recognitionLanguages = ["en-US"]
+    guard (try? VNImageRequestHandler(cgImage: rendered, options: [:]).perform([request])) != nil
+    else {
+        return []
+    }
+    return (request.results ?? []).compactMap { observation in
+        observation.topCandidates(1).first.map { candidate in
+            Reading(
+                y: Double(observation.boundingBox.midY),
+                x: Double(observation.boundingBox.minX),
+                text: candidate.string,
+                confidence: candidate.confidence
+            )
+        }
+    }
+}
 
-let handler = VNImageRequestHandler(cgImage: upscaled, options: [:])
-do {
-    try handler.perform([request])
-} catch {
-    fputs("Vision could not process the image: \(error)\n", stderr)
+let allReadings = recognitionScales.flatMap(readings(scale:))
+if allReadings.isEmpty {
+    fputs("Vision could not read any text in the image.\n", stderr)
     exit(4)
 }
 
-let observations = (request.results ?? []).sorted {
-    let verticalDistance = abs($0.boundingBox.midY - $1.boundingBox.midY)
-    if verticalDistance > 0.02 {
-        return $0.boundingBox.midY > $1.boundingBox.midY
+// Group the same physical line of writing across the scales. Position must match
+// horizontally as well as vertically, so two separate runs of text side by side
+// stay two lines instead of one silently swallowing the other.
+let lineTolerance = 0.012
+let columnTolerance = 0.06
+var lines: [[Reading]] = []
+for reading in allReadings.sorted(by: { $0.y > $1.y }) {
+    let existing = lines.firstIndex { group in
+        guard let first = group.first else { return false }
+        return abs(first.y - reading.y) < lineTolerance
+            && abs(first.x - reading.x) < columnTolerance
     }
-    return $0.boundingBox.minX < $1.boundingBox.minX
+    if let existing {
+        lines[existing].append(reading)
+    } else {
+        lines.append([reading])
+    }
 }
 
-for observation in observations {
-    if let candidate = observation.topCandidates(1).first {
-        print(candidate.string)
+let ordered = lines.sorted { first, second in
+    guard let a = first.first, let b = second.first else { return false }
+    // The same tolerance the grouping uses: a coarser one here lets two adjacent
+    // lines fall into the left-to-right tiebreak and swap places.
+    if abs(a.y - b.y) > lineTolerance {
+        return a.y > b.y
+    }
+    return a.x < b.x
+}
+
+for line in ordered {
+    // Vision's own confidence picks the better reading more often than preferring
+    // the longest string does: 23 of 31 expected terms against 20.
+    let best = line.max { first, second in
+        (first.confidence, first.text.count) < (second.confidence, second.text.count)
+    }
+    if let best {
+        print(best.text)
     }
 }

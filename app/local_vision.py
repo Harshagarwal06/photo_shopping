@@ -185,6 +185,20 @@ LETTER_CONFUSIONS = {
 # A photographed list often starts with a title. Without this it is searched for
 # as though it were a product, and Blinkit obligingly sells something.
 HEADER_RE = re.compile(r"^(?:\w+\W+){0,2}lists?\W*$", re.IGNORECASE)
+# Ruled notebooks carry their own printed words, and OCR reads them alongside the
+# writing. None is ever a grocery item, and "Date" or "Page No." would otherwise
+# be searched for and matched against something.
+STATIONERY_RE = re.compile(
+    r"^(?:good\s*luck|page\s*n[o0]\.?|date|name|class|subject|roll\s*n[o0]\.?|"
+    r"sr\.?\s*n[o0]\.?|topic|day)\W*$",
+    re.IGNORECASE,
+)
+# The heading is often the worst-read line on the page: "Grocery list" has come
+# back as "Grocery hist" and "Grocery ust". Recognise it by its first word rather
+# than its last, because "ust" is no closer to "list" than "salt" is, while
+# "Crocery" is unmistakably "Grocery". Only these two words: "sabzi" or "market"
+# would swallow real products such as "sabzi masala".
+HEADING_WORDS = ("grocery", "shopping")
 # "Paneer (Amul)" is a product and a brand, not a product called "paneer (amul)".
 # The brand moves to the item's context, which the ranker already scores against.
 PARENTHETICAL_RE = re.compile(r"\(([^)]*)\)")
@@ -193,6 +207,17 @@ PARENTHETICAL_RE = re.compile(r"\(([^)]*)\)")
 QUANTITY_ONLY_RE = re.compile(
     rf"^(?:{QUANTITY_PATTERN})\s*(?:{UNIT_PATTERN})$", re.IGNORECASE
 )
+# "(Amul - 500ml)" is a brand and a size together: the size belongs on the line,
+# the brand in the context.
+MEASUREMENT_IN_NOTE_RE = re.compile(
+    rf"(?:{QUANTITY_PATTERN})\s*(?:{UNIT_PATTERN})\b", re.IGNORECASE
+)
+# An opening bracket in cursive is read as a "C" often enough to matter: the list
+# that read "CAmul - 500ml)" lost both the brand and the size. Only repaired when
+# the line closes a bracket it never opened.
+# The lookahead forbids a further "C" so that the repair lands on the "C" nearest
+# the bracket: in "Cao mill CAmul - 500ml)" the first one is part of the product.
+UNOPENED_BRACKET_RE = re.compile(r"\bC(?=\w[^()C]*\))")
 MAX_CONFUSION_VARIANTS = 8
 # 0.85 is deliberately tight. At 0.8, "paneer"/"pani" and "0nion"/"onion" score
 # identically, so no threshold separates them — hence OCR_CONFUSIONS.
@@ -272,6 +297,20 @@ def _clean_name(name: str) -> str:
     )
 
 
+def _is_page_furniture(value: str) -> bool:
+    """True for a list heading or a notebook's own printed labels."""
+    if HEADER_RE.match(value) or STATIONERY_RE.match(value):
+        return True
+    words = re.findall(r"\w+", value)
+    # A heading is short. Anything longer is a product line that happens to start
+    # with the word.
+    if not words or len(words) > 3:
+        return False
+    return bool(
+        difflib.get_close_matches(words[0].casefold(), HEADING_WORDS, n=1, cutoff=0.8)
+    )
+
+
 def _split_parenthetical(value: str) -> tuple[str, str]:
     """Separate a bracketed brand or note from the product itself."""
     notes: list[str] = []
@@ -282,10 +321,18 @@ def _split_parenthetical(value: str) -> tuple[str, str]:
         amount = IMPLICIT_SINGLE_RE.sub("1 ", note)
         if QUANTITY_ONLY_RE.match(amount):
             return f" {amount} "
+        measurement = MEASUREMENT_IN_NOTE_RE.search(note)
+        if measurement:
+            rest = (note[: measurement.start()] + note[measurement.end() :]).strip(" -–—,;")
+            if rest:
+                notes.append(rest)
+            return f" {measurement.group(0)} "
         if note:
             notes.append(note)
         return " "
 
+    if ")" in value and "(" not in value:
+        value = UNOPENED_BRACKET_RE.sub("(", value, count=1)
     remainder = re.sub(r"\s+", " ", PARENTHETICAL_RE.sub(capture, value)).strip(" ,.-")
     if not remainder and notes:
         # The line was only a bracketed word, so that word is the product.
@@ -298,7 +345,7 @@ def _parse_item(raw: str, source: str) -> PlannedItem | None:
     # loses its "2." and becomes five kilos.
     value = re.sub(r"^\s*(?:[-*•]\s*|\d+[.)]\s+)", "", raw).strip()
     value = BUDGET_RE.sub("", value).strip(" ,.-")
-    if not value or HEADER_RE.match(value):
+    if not value or _is_page_furniture(value):
         return None
     value, context = _split_parenthetical(value)
     if not value:

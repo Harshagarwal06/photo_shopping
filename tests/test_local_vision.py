@@ -208,6 +208,59 @@ def test_a_line_that_is_only_a_bracketed_word_keeps_that_word():
     assert (item.search_term, item.context) == ("Amul", "")
 
 
+@pytest.mark.parametrize(
+    "line",
+    ["GoodLuck", "Page No.", "Date", "Name", "Roll No.", "• Grocery ust", "• Crocery list."],
+)
+def test_notebook_furniture_and_misread_headings_are_dropped(line):
+    """A ruled notebook prints its own words, and OCR reads them as list items.
+
+    The heading is matched on its first word: "ust" is no nearer to "list" than
+    "salt" is, while "Crocery" is unmistakably "Grocery".
+    """
+    assert _parse_item(line, "photo") is None
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["salt", "Pads", "Dalcheeni", "sabzi masala", "market fresh paneer", "Date nut bar"],
+)
+def test_furniture_filter_leaves_products_alone(line):
+    assert _parse_item(line, "photo") is not None
+
+
+@pytest.mark.parametrize(
+    ("line", "term", "context", "quantity", "unit"),
+    [
+        ("milk (Amul - 500ml)", "milk", "Amul", 500, "ml"),
+        ("curd (Nestle - 400 gm)", "curd", "Nestle", 400, "g"),
+        ("atta (Aashirvaad 5 kg)", "atta", "Aashirvaad", 5, "kg"),
+        # An opening bracket read as "C", as photographed.
+        ("Cao mill CAmul - 500ml)", "Cao mill", "Amul", 500, "ml"),
+    ],
+)
+def test_a_bracket_holding_brand_and_size_yields_both(line, term, context, quantity, unit):
+    item = _parse_item(line, "photo")
+
+    assert (item.search_term, item.context, item.quantity, item.unit) == (
+        term,
+        context,
+        quantity,
+        unit,
+    )
+
+
+@pytest.mark.parametrize(
+    "line", ["Coke Can", "Cold coffee", "Coffee", "Curd", "Crocin tablets", "Cao mill"]
+)
+def test_the_bracket_repair_needs_an_unclosed_bracket(line):
+    """Only a line that closes a bracket it never opened is repaired, so an
+    ordinary product beginning with "C" is untouched."""
+    item = _parse_item(line, "photo")
+
+    assert (item.search_term, item.context) == (line, "")
+
+
 @pytest.mark.parametrize("line", ["1/0 kg broken", "0 kg nothing"])
 def test_unusable_quantity_falls_back_instead_of_raising(line):
     """A zero denominator must not divide by zero, and 0 fails PlannedItem's gt=0."""
