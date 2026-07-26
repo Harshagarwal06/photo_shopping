@@ -185,6 +185,14 @@ LETTER_CONFUSIONS = {
 # A photographed list often starts with a title. Without this it is searched for
 # as though it were a product, and Blinkit obligingly sells something.
 HEADER_RE = re.compile(r"^(?:\w+\W+){0,2}lists?\W*$", re.IGNORECASE)
+# "Paneer (Amul)" is a product and a brand, not a product called "paneer (amul)".
+# The brand moves to the item's context, which the ranker already scores against.
+PARENTHETICAL_RE = re.compile(r"\(([^)]*)\)")
+# ... unless the brackets hold the amount, as in "Atta (5 kg)", in which case the
+# text belongs back on the line for the quantity parsing to read.
+QUANTITY_ONLY_RE = re.compile(
+    rf"^(?:{QUANTITY_PATTERN})\s*(?:{UNIT_PATTERN})$", re.IGNORECASE
+)
 MAX_CONFUSION_VARIANTS = 8
 # 0.85 is deliberately tight. At 0.8, "paneer"/"pani" and "0nion"/"onion" score
 # identically, so no threshold separates them — hence OCR_CONFUSIONS.
@@ -264,12 +272,36 @@ def _clean_name(name: str) -> str:
     )
 
 
+def _split_parenthetical(value: str) -> tuple[str, str]:
+    """Separate a bracketed brand or note from the product itself."""
+    notes: list[str] = []
+
+    def capture(match: re.Match[str]) -> str:
+        note = match.group(1).strip()
+        # "(dozen)" is an amount too, the same way "dozen eggs" is.
+        amount = IMPLICIT_SINGLE_RE.sub("1 ", note)
+        if QUANTITY_ONLY_RE.match(amount):
+            return f" {amount} "
+        if note:
+            notes.append(note)
+        return " "
+
+    remainder = re.sub(r"\s+", " ", PARENTHETICAL_RE.sub(capture, value)).strip(" ,.-")
+    if not remainder and notes:
+        # The line was only a bracketed word, so that word is the product.
+        return notes[0], ""
+    return remainder, ", ".join(notes)
+
+
 def _parse_item(raw: str, source: str) -> PlannedItem | None:
     # A numbered-list marker needs the trailing space: without it "2.5 kg rice"
     # loses its "2." and becomes five kilos.
     value = re.sub(r"^\s*(?:[-*•]\s*|\d+[.)]\s+)", "", raw).strip()
     value = BUDGET_RE.sub("", value).strip(" ,.-")
     if not value or HEADER_RE.match(value):
+        return None
+    value, context = _split_parenthetical(value)
+    if not value:
         return None
     value = IMPLICIT_SINGLE_RE.sub("1 ", value)
 
@@ -289,6 +321,7 @@ def _parse_item(raw: str, source: str) -> PlannedItem | None:
         return None
     return PlannedItem(
         search_term=name,
+        context=context,
         quantity=quantity,
         unit=unit,
         raw_text=raw.strip(),

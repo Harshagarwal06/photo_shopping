@@ -170,6 +170,44 @@ def test_single_letter_swaps_do_not_capture_ordinary_products(line):
     assert _parse_item(line, "photo").search_term == line
 
 
+@pytest.mark.parametrize(
+    ("line", "term", "context"),
+    [
+        ("Paneer (Amul)", "Paneer", "Amul"),
+        ("Panees (Amul)", "paneer", "Amul"),  # as photographed, "r" read as "s"
+        ("Curd (Nestle) 400 gm", "Curd", "Nestle"),
+        ("Milk (full cream) 2 l", "Milk", "full cream"),
+    ],
+)
+def test_a_bracketed_brand_becomes_context_not_part_of_the_query(line, term, context):
+    """The ranker scores search_term and context together, so the brand still
+    counts — but the provider is asked for "paneer", not "paneer (amul)"."""
+    item = _parse_item(line, "photo")
+
+    assert (item.search_term, item.context) == (term, context)
+
+
+@pytest.mark.parametrize(
+    ("line", "quantity", "unit"),
+    [
+        ("Atta (5 kg)", 5, "kg"),
+        ("rice (1/2 kg)", 0.5, "kg"),
+        ("eggs (dozen)", 12, "count"),
+        ("maggi (packet)", 1, "pack"),
+    ],
+)
+def test_a_bracketed_amount_is_read_as_the_quantity(line, quantity, unit):
+    item = _parse_item(line, "photo")
+
+    assert (item.quantity, item.unit, item.context) == (quantity, unit, "")
+
+
+def test_a_line_that_is_only_a_bracketed_word_keeps_that_word():
+    item = _parse_item("(Amul)", "photo")
+
+    assert (item.search_term, item.context) == ("Amul", "")
+
+
 @pytest.mark.parametrize("line", ["1/0 kg broken", "0 kg nothing"])
 def test_unusable_quantity_falls_back_instead_of_raising(line):
     """A zero denominator must not divide by zero, and 0 fails PlannedItem's gt=0."""
