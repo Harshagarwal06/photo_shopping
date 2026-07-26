@@ -67,6 +67,13 @@ UNIT_ALIASES = {
 # themselves the retail name — paneer, atta, besan, ghee, dal, bhindi, maida —
 # are left alone or only spelling-normalised, because translating them ("okra",
 # "clarified butter") searches for something the catalogue does not call it.
+#
+# A translation can also cost precision even when both words find the same
+# products. Blinkit returns an identical five for "masala chai" and "masala tea",
+# but the ranker scores how much of the query appears in the product name, so
+# dropping "chai" makes the loose tea and the instant premix score alike and
+# price picks the premix. Measured: "masala chai" selects Girnar Masala Chai Tea
+# 250 g, "masala tea" selects Red Label Masala Instant Tea Premix 10 pcs.
 TERM_ALIASES = {
     # dairy and eggs
     "doodh": "milk",
@@ -109,8 +116,7 @@ TERM_ALIASES = {
     "mirch": "chilli",
     "mirchi": "chilli",
     # everything else
-    "chai": "tea",
-    "chai patti": "tea",
+    # "chai" is deliberately absent: see RETAIL_TERMS.
     "sabun": "soap",
 }
 
@@ -154,9 +160,10 @@ def _normalise_unit(unit: str | None, *, had_quantity: bool) -> str:
 # against "pani", which would order water.
 RETAIL_TERMS = frozenset(
     {
-        "atta", "besan", "bhindi", "chana", "coffee", "dal", "ghee", "gobi",
-        "jaggery", "kaju", "maida", "maggi", "methi", "moong", "murmura",
-        "paneer", "poha", "rajma", "rava", "sooji", "suji", "toor", "upma",
+        "atta", "besan", "bhindi", "chai", "chana", "coffee", "dal", "ghee",
+        "gobi", "jaggery", "kaju", "maida", "maggi", "methi", "moong",
+        "murmura", "paneer", "patti", "poha", "rajma", "rava", "sooji", "suji",
+        "toor", "upma",
     }
 )
 # Every spelling the parser treats as already correct: lexicon keys, what they

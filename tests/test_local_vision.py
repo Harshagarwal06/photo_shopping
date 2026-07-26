@@ -71,12 +71,21 @@ def test_container_words_inside_a_product_name_are_left_alone(line):
         ("dahi 400gm", "curd"),
         ("1/2 kg tamatar", "tomato"),
         ("2 packet jeera", "cumin"),
-        ("chai patti", "tea"),
         ("haldi", "turmeric"),
     ],
 )
 def test_hinglish_terms_resolve_to_searchable_names(line, term):
     assert _parse_item(line, "photo").search_term == term
+
+
+@pytest.mark.parametrize(
+    "line", ["chai", "chai patti", "masala chai powder", "wagh bakri masala chai"]
+)
+def test_chai_is_not_translated_to_tea(line):
+    """Measured on Blinkit: the two words return the same five products, but the
+    ranker scores the query against the product name, so dropping "chai" lets a
+    ₹99 instant premix outscore the ₹170 loose masala chai the list asked for."""
+    assert _parse_item(line, "photo").search_term == line
 
 
 @pytest.mark.parametrize("line", ["paneer 200gm", "besan 1 packet", "bhindi 500g"])
