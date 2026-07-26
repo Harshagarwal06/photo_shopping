@@ -14,14 +14,24 @@ BUDGET_RE = re.compile(
     r"\b(?:under|below|budget(?:\s+of)?|up\s*to|upto)\s*₹?\s*([\d,]+(?:\.\d+)?)",
     re.IGNORECASE,
 )
+VULGAR_FRACTIONS = {"½": 0.5, "¼": 0.25, "¾": 0.75, "⅓": 1 / 3, "⅔": 2 / 3, "⅛": 0.125}
+FRACTION_CHARS = "".join(VULGAR_FRACTIONS)
+# Longest form first: "1/2" must win over the bare "1" that also matches it.
+QUANTITY_PATTERN = (
+    rf"\d+\s*[{FRACTION_CHARS}]|[{FRACTION_CHARS}]|\d+\s*/\s*\d+|\d+(?:\.\d+)?"
+)
+UNIT_PATTERN = r"kg|g|gm|l|ltr|ml|pcs?|pieces?|count|dozens?|packets?|packs?"
 LEADING_QUANTITY_RE = re.compile(
-    r"^(?P<quantity>\d+(?:\.\d+)?)\s*(?P<unit>kg|g|gm|l|ltr|ml|pcs?|pieces?|count|packs?)?\s+(?P<name>.+)$",
+    rf"^(?P<quantity>{QUANTITY_PATTERN})\s*(?P<unit>{UNIT_PATTERN})?\s+(?P<name>.+)$",
     re.IGNORECASE,
 )
 TRAILING_QUANTITY_RE = re.compile(
-    r"^(?P<name>.+?)\s+(?P<quantity>\d+(?:\.\d+)?)\s*(?P<unit>kg|g|gm|l|ltr|ml|pcs?|pieces?|count|packs?)$",
+    rf"^(?P<name>.+?)\s+(?P<quantity>{QUANTITY_PATTERN})\s*(?P<unit>{UNIT_PATTERN})$",
     re.IGNORECASE,
 )
+# "dozen eggs" means one dozen. Restricted to container words on purpose: letting
+# a bare "l" or "g" imply a quantity would rewrite ordinary product names.
+IMPLICIT_SINGLE_RE = re.compile(r"^(?=(?:dozens?|packets?|packs?)\b)", re.IGNORECASE)
 UNIT_ALIASES = {
     "gm": "g",
     "ltr": "l",
@@ -31,6 +41,9 @@ UNIT_ALIASES = {
     "pieces": "count",
     "pack": "pack",
     "packs": "pack",
+    "packet": "pack",
+    "packets": "pack",
+    "dozens": "dozen",
 }
 TERM_ALIASES = {
     "doodh": "milk",
@@ -74,6 +87,22 @@ def _normalise_unit(unit: str | None, *, had_quantity: bool) -> str:
     return UNIT_ALIASES.get(lowered, lowered)
 
 
+def _parse_quantity(raw: str) -> float | None:
+    """Read "2", "2.5", "1/2", "½", or "1½". None when the text cannot be a count."""
+    value = raw.strip()
+    for symbol, fraction in VULGAR_FRACTIONS.items():
+        if value.endswith(symbol):
+            whole = value[: -len(symbol)].strip()
+            return (float(whole) if whole else 0.0) + fraction
+    if "/" in value:
+        numerator, _, denominator = value.partition("/")
+        divisor = float(denominator.strip())
+        if divisor == 0:
+            return None
+        return float(numerator.strip()) / divisor
+    return float(value)
+
+
 def _clean_name(name: str) -> str:
     cleaned = re.sub(r"\b(?:please|get|buy|need|add)\b", " ", name, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" .:-")
@@ -81,15 +110,21 @@ def _clean_name(name: str) -> str:
 
 
 def _parse_item(raw: str, source: str) -> PlannedItem | None:
-    value = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", raw).strip()
+    # A numbered-list marker needs the trailing space: without it "2.5 kg rice"
+    # loses its "2." and becomes five kilos.
+    value = re.sub(r"^\s*(?:[-*•]\s*|\d+[.)]\s+)", "", raw).strip()
     value = BUDGET_RE.sub("", value).strip(" ,.-")
     if not value:
         return None
+    value = IMPLICIT_SINGLE_RE.sub("1 ", value)
 
     match = TRAILING_QUANTITY_RE.match(value) or LEADING_QUANTITY_RE.match(value)
-    if match:
-        quantity = float(match.group("quantity"))
+    quantity = _parse_quantity(match.group("quantity")) if match else None
+    if match and quantity:
         unit = _normalise_unit(match.group("unit"), had_quantity=True)
+        if unit == "dozen":
+            quantity *= 12
+            unit = "count"
         name = _clean_name(match.group("name"))
     else:
         quantity = 1
