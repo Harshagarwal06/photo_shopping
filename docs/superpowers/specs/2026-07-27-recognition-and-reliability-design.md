@@ -20,6 +20,11 @@ measurement problem rather than a bug:
   corrections transcribed from four specific photographs. Measured against those
   photographs the pipeline is exact by construction, so no current number
   describes how well the app reads handwriting.
+- **The comparison compares different products.** Found later, from a real
+  four-item run: the cross-platform matcher short-circuits on the configured
+  backend, so each platform is matched in isolation and the resulting baskets
+  differ in brand and pack size. This defeats the app's central claim rather
+  than degrading it, and is treated as a first-class section below.
 
 Measured evidence that shaped the design: a single cloud call on the **whole**
 photo returned 7 of 8 lines correctly in about 4 seconds with no memorised
@@ -179,6 +184,114 @@ backend. Actual dish expansion through the cloud path is out of scope here.
 - Typed lines display a lexicon-coverage confidence (15% for `quinoa 500g`).
   Typed text is not OCR and should carry no such score into the UI.
 
+## Comparison equivalence
+
+"Which app is cheapest for my list" is the product. It is currently wrong
+whenever the compared baskets differ in pack size, which — for a list without
+written quantities — is most of the time.
+
+### The short circuit
+
+`match_across_platforms` carries the correct instruction: *prefer the same brand
+and pack size on every platform so their prices are comparable*. That instruction
+lives only in the hosted-model prompt, and [matcher.py:400](../../../app/matcher.py)
+never reaches it under ordinary configuration:
+
+```python
+if settings.demo_mode or settings.safety_lock or settings.model_backend == "local":
+    return _fallback_cross_match(item, candidates_by_provider)
+```
+
+`_fallback_cross_match` then calls `_fallback_match(item, candidates)` once per
+platform. That function has no parameter through which the other platforms could
+be known. Three independent "best product for this request" decisions are
+rendered side by side as though they were one basket.
+
+The configurations that hit the short circuit — `local` backend, `safety_lock`,
+`demo_mode` — are the safe defaults. The equivalence logic is therefore absent
+precisely when a cautious user is running the app.
+
+### What it costs, measured
+
+From a live four-item run (basmati rice, rajma, jeera, hing):
+
+| Item | Blinkit | Instamart | Zepto |
+|---|---|---|---|
+| Rice | Daawat Rozana Super, **Medium Grain** ₹93 | Daawat Rozana Super ₹90 | Daawat Pulav, **Long Grain** ₹148 |
+| Rajma | Whole Farm **250 g** ₹48 | Tata Sampann **500 g** ₹93 | Daily Good ₹85 |
+| Cumin | Whole Farm ₹41 | Supreme Harvest 100 g ₹49 | Orika Nagauri **jar** ₹167 |
+| Hing | Vandevi **Brown** 50 g ₹56 | Everest **Yellow** 50 g ₹85 | Everest 50 g ₹96 |
+
+The rajma row inverts the answer. ₹48 against ₹93 reads as Blinkit at half price;
+per 100 g it is ₹19.2 against ₹18.6, so Instamart is cheaper. The cumin row is
+not a price difference at all — a ₹41 packet against a ₹167 speciality jar. The
+"Blinkit recommended" verdict is partly an artefact of Blinkit's matcher landing
+on smaller packs.
+
+### Why the existing safeguards missed it
+
+- **Fill-ratio checking** (`compare.py`) needs a requested measurement to compare
+  against. A list without quantities yields "1 item", `requested_measurement`
+  returns `None`, and the check cannot run. The four red *"Quantity not verified"*
+  lines in that run are the app correctly reporting this; what it does not say is
+  that an unverified quantity makes the price comparison meaningless.
+- **Ranking** sorts on `coverage_tier` then raw `summary.total`. `per_unit_price`
+  exists in `units.py` but only annotates individual fill-ratio warnings.
+
+### Design
+
+**Anchor-based cross-matching, with no hosted model required.** The fix belongs in
+the fallback, since that is the path that actually runs.
+
+1. Score each platform's candidates as today, per platform.
+2. Choose an **anchor**: the candidate the matcher is most confident about across
+   all platforms. Selection uses the request-relevance and quantity-fit terms
+   only, **not** the composite score. `_score_candidate` normalises its price term
+   against `lowest_total` within one platform's own candidate list, so composite
+   scores are not comparable between platforms and picking on them would make the
+   anchor a function of each platform's internal price spread.
+3. Extract the anchor's brand (the existing `KNOWN_BRAND_PHRASES` /
+   `_brand_from_name` machinery) and its normalised pack measurement
+   (`parse_measurement`).
+4. Re-score every platform with two added terms: brand agreement with the anchor,
+   and pack-size agreement within the existing `min_fill_ratio` /
+   `max_fill_ratio` band.
+5. Where a platform has **no candidate inside the band, report no equivalent** —
+   `product_id: null` — instead of forcing a pick.
+
+Step 5 is the substantive change. Today the fallback always returns something,
+which is how a jar gets compared to a packet. It also converges the two backends'
+behaviour: refusing a poor match is already what the hosted prompt instructs.
+
+The band check applies to hosted picks too, not only to the fallback. A hosted
+model can return divergent pack sizes while obeying its own id validation, and
+the existing verification loop checks only that ids are real and in stock. Pack
+and brand equivalence become part of that same trust boundary.
+
+**Ranking needs no new axis.** A platform with no equivalent reports the line as
+missing, which drops it a `coverage_tier`, and the existing lexicographic ranking
+handles it. This composes with the `matched_items > 0` requirement added in Batch
+B: a platform with no comparable products cannot win on an empty cart.
+`per_unit_price` is used to *detect* pack divergence in step 4 and to disclose it,
+not as a competing sort key.
+
+**Disclosure in the interface.** Each comparison row states what is being
+compared — the anchor's brand and pack size — and each platform shows either its
+equivalent or an explicit "no comparable product". Pack size moves out of
+truncated dropdown text, where the 250 g / 500 g difference was invisible, into
+the row itself.
+
+### Verification
+
+Comparability is a ranking property, so it belongs with the ranking corpus
+(`tools/ranking_corpus.py`) rather than the recognition harness. Two checks:
+
+- Recorded multi-platform candidate sets where the correct answer is known,
+  asserting the anchor's brand and pack size are held across platforms.
+- A regression on the case above: given those rajma candidates, either the packs
+  match or the mismatched platform reports no equivalent. Never 250 g against
+  500 g compared on face value.
+
 ## Provider resilience
 
 Once Blinkit began refusing it continued for more than 15 minutes; every query
@@ -297,9 +410,15 @@ calibrated against).
    that every later step is measured against.
 2. Delete the adjudicator; escalation becomes per-page and full-photo.
 3. Defect batches A, B, C — independent of each other and of the above.
-4. Provider resilience, calibrated against a headed run.
-5. Capture-quality gate, thresholds set from harness output.
-6. Shrink the repair table, each removal justified by measurement.
+4. Comparison equivalence. Depends on Batch B only for the `matched_items > 0`
+   rule it composes with; otherwise independent, and the highest product value
+   per unit of work in this document.
+5. Provider resilience, calibrated against a headed run.
+6. Capture-quality gate, thresholds set from harness output.
+7. Shrink the repair table, each removal justified by measurement.
+
+Steps 3 and 4 do not depend on the recognition rework and can be done first if
+shipping value early matters more than sequencing cleanly.
 
 ## Out of scope
 
