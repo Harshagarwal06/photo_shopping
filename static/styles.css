@@ -927,6 +927,15 @@ textarea[aria-invalid="true"],
   color: var(--color-muted);
 }
 
+/* An item this platform cannot supply comparably. Muted rather than alarming:
+   it is information about the comparison, not a failure the user must fix. */
+.comparison-line-unmatched strong {
+  color: var(--color-muted);
+  font-weight: 500;
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+
 .comparison-product-editor {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 4rem;

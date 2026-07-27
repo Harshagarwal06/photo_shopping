@@ -1,6 +1,7 @@
 import pytest
 
 from app.config import Settings
+from app.constraints import parse_measurement
 from app.llm import ModelBackendError
 from app.matcher import match_across_platforms
 from app.models import PlannedItem, Product
@@ -104,6 +105,143 @@ def test_units_scale_to_the_pack_size_each_platform_stocks():
 def test_empty_provider_map_returns_empty_picks():
     item = PlannedItem(search_term="milk", quantity=1, unit="l")
     assert match_across_platforms(item, {}, _settings()).picks == {}
+
+
+# --- Comparability: platforms must deliver the same amount, or none. ----------
+# A list written without quantities ("rajma") gives the matcher nothing to
+# verify against, so each platform used to pick its own best-value pack and the
+# totals were compared at face value. Live, that compared 250 g at Rs48 against
+# 500 g at Rs93 and reported the dearer one as cheaper: Rs19.2 against Rs18.6
+# per 100 g.
+
+
+def _delivered(result, provider: str, candidates: list[Product]) -> float | None:
+    """Grams or millilitres a platform's pick actually delivers."""
+    decision = result.picks[provider]
+    if decision.product_id is None:
+        return None
+    product = next(p for p in candidates if p.id == decision.product_id)
+    measurement = parse_measurement(product.pack_size)
+    return measurement[0] * decision.units_to_add if measurement else None
+
+
+def test_platforms_converge_on_the_same_delivered_quantity():
+    """With no quantity requested, an equivalent pack exists on both platforms
+    and both must choose it -- not each platform's own best value."""
+    item = PlannedItem(search_term="rajma", quantity=1, unit="item")
+    blinkit = [
+        _product("b-250", "Whole Farm Premium Red Rajma", "250 g", 48.0),
+        _product("b-500", "Whole Farm Premium Red Rajma", "500 g", 95.0),
+    ]
+    instamart = [_product("i-500", "Tata Sampann Unpolished Rajma", "500 g", 93.0)]
+
+    result = match_across_platforms(
+        item, {"blinkit": blinkit, "instamart": instamart}, _settings()
+    )
+
+    assert _delivered(result, "blinkit", blinkit) == _delivered(
+        result, "instamart", instamart
+    )
+
+
+def test_the_live_failure_buys_multiple_packs_rather_than_comparing_unequal_ones():
+    """The live failure: 250 g at Rs48 against 500 g at Rs93, reported as half
+    the price. Two 250 g packs reach the same 500 g, so the honest comparison is
+    Rs96 against Rs93 -- and Instamart, the cheaper one per gram, wins."""
+    item = PlannedItem(search_term="rajma", quantity=1, unit="item")
+    blinkit = [_product("b-250", "Whole Farm Premium Red Rajma", "250 g", 48.0)]
+    instamart = [_product("i-500", "Tata Sampann Unpolished Rajma", "500 g", 93.0)]
+
+    result = match_across_platforms(
+        item, {"blinkit": blinkit, "instamart": instamart}, _settings()
+    )
+
+    assert result.picks["blinkit"].units_to_add == 2
+    assert _delivered(result, "blinkit", blinkit) == _delivered(
+        result, "instamart", instamart
+    )
+
+
+def test_a_platform_that_cannot_reach_the_stated_amount_is_not_compared():
+    """500 g asked for, and one platform stocks only a 2 kg sack. No number of
+    packs lands inside the band, so comparing its price would mislead."""
+    item = PlannedItem(search_term="rajma", quantity=500, unit="g")
+    blinkit = [_product("b-2kg", "Whole Farm Red Rajma", "2 kg", 260.0)]
+    instamart = [_product("i-500", "Tata Sampann Rajma", "500 g", 93.0)]
+
+    result = match_across_platforms(
+        item, {"blinkit": blinkit, "instamart": instamart}, _settings()
+    )
+
+    assert result.picks["blinkit"].product_id is None
+    assert result.picks["blinkit"].units_to_add == 0
+    assert result.picks["instamart"].product_id == "i-500"
+    assert "blinkit" in result.equivalence_note.lower()
+
+
+def test_a_stated_quantity_is_the_reference_not_the_catalogue():
+    """500 g asked for: the 500 g pack wins even though 1 kg is better value."""
+    item = PlannedItem(search_term="rajma", quantity=500, unit="g")
+    blinkit = [
+        _product("b-1kg", "Whole Farm Red Rajma", "1 kg", 150.0),
+        _product("b-500", "Whole Farm Red Rajma", "500 g", 95.0),
+    ]
+    instamart = [_product("i-500", "Tata Sampann Rajma", "500 g", 93.0)]
+
+    result = match_across_platforms(
+        item, {"blinkit": blinkit, "instamart": instamart}, _settings()
+    )
+
+    assert result.picks["blinkit"].product_id == "b-500"
+    assert result.picks["instamart"].product_id == "i-500"
+
+
+def test_hosted_picks_at_unequal_amounts_are_rejected(monkeypatch):
+    """Id validation is not enough. A hosted model can name real, in-stock,
+    correctly-branded products that deliver different amounts, which is the same
+    misleading comparison arriving through a path that looks trustworthy."""
+    monkeypatch.setattr(
+        "app.matcher.HFModelClient",
+        _fake_client_returning(
+            {
+                "picks": {
+                    "blinkit": {"product_id": "b-250", "units_to_add": 1,
+                                "reason": "cheapest"},
+                    "instamart": {"product_id": "i-500", "units_to_add": 1,
+                                  "reason": "cheapest"},
+                },
+                "equivalence_note": "Both are rajma.",
+            }
+        ),
+    )
+    item = PlannedItem(search_term="rajma", quantity=1, unit="item")
+    blinkit = [_product("b-250", "Whole Farm Premium Red Rajma", "250 g", 48.0)]
+    instamart = [_product("i-500", "Tata Sampann Unpolished Rajma", "500 g", 93.0)]
+
+    result = match_across_platforms(
+        item, {"blinkit": blinkit, "instamart": instamart}, _llm_settings()
+    )
+
+    assert _delivered(result, "blinkit", blinkit) == _delivered(
+        result, "instamart", instamart
+    )
+
+
+def test_unmeasurable_packs_still_match_independently():
+    """Pieces and loose items have no parseable amount; refusing everything
+    would be worse than comparing the best match on each platform."""
+    item = PlannedItem(search_term="kitkat", quantity=1, unit="item")
+    result = match_across_platforms(
+        item,
+        {
+            "blinkit": [_product("b1", "KitKat Chocolate Bar", "1 pc", 20.0)],
+            "zepto": [_product("z1", "KitKat Chocolate Bar", "1 pc", 22.0)],
+        },
+        _settings(),
+    )
+
+    assert result.picks["blinkit"].product_id == "b1"
+    assert result.picks["zepto"].product_id == "z1"
 
 
 # --- LLM path: the sanitization loop is the entire trust boundary. ------------

@@ -391,7 +391,7 @@ def match_across_platforms(
         return CrossPlatformMatch()
 
     if settings.demo_mode or settings.safety_lock or settings.model_backend == "local":
-        return _fallback_cross_match(item, candidates_by_provider)
+        return _fallback_cross_match(item, candidates_by_provider, settings)
 
     payload = {
         provider: [
@@ -418,13 +418,13 @@ def match_across_platforms(
     except ModelBackendError:
         if not settings.local_vision_fallback:
             raise
-        return _fallback_cross_match(item, candidates_by_provider)
+        return _fallback_cross_match(item, candidates_by_provider, settings)
 
     try:
         result = CrossPlatformMatch.model_validate(raw)
     except ValidationError:
         # A malformed shape is recoverable: fall back rather than fail the run.
-        return _fallback_cross_match(item, candidates_by_provider)
+        return _fallback_cross_match(item, candidates_by_provider, settings)
 
     # Never trust the model's ids or provider keys: rebuild picks from scratch,
     # restricted strictly to the providers we actually asked about, and accept
@@ -438,22 +438,195 @@ def match_across_platforms(
             verified_picks[provider] = decision
         else:
             verified_picks[provider] = _fallback_match(item, candidates)
+
+    # Valid ids are not a comparable basket. A model can name real, in-stock,
+    # correctly-branded products that deliver different amounts, which is the
+    # same misleading comparison arriving by a route that looks trustworthy.
+    # Amounts belong on this trust boundary alongside ids.
+    if not _delivers_one_amount(verified_picks, candidates_by_provider, settings):
+        return _fallback_cross_match(item, candidates_by_provider, settings)
+
     result.picks = verified_picks
     return result
+
+
+def _delivers_one_amount(
+    picks: dict[str, MatchDecision],
+    candidates_by_provider: dict[str, list[Product]],
+    settings: Settings,
+) -> bool:
+    """True when every selected product delivers the same measurable amount."""
+    delivered: list[tuple[float, str]] = []
+    for provider, decision in picks.items():
+        if decision.product_id is None:
+            continue
+        product = next(
+            (
+                candidate
+                for candidate in candidates_by_provider.get(provider, [])
+                if candidate.id == decision.product_id
+            ),
+            None,
+        )
+        if product is None:
+            return False
+        packed = parse_measurement(product.pack_size or product.name)
+        if packed is None:
+            # Unmeasurable packs cannot be checked, and refusing them would
+            # reject every loose or piece-sold item. Left to the id check.
+            continue
+        delivered.append((packed[0] * decision.units_to_add, packed[1]))
+    if len(delivered) < 2:
+        return True
+    dimensions = {dimension for _, dimension in delivered}
+    if len(dimensions) > 1:
+        return False
+    amounts = [amount for amount, _ in delivered]
+    return (max(amounts) / min(amounts)) <= (
+        settings.max_fill_ratio / settings.min_fill_ratio
+    )
+
+
+def _request_relevance(item: PlannedItem, product: Product) -> float:
+    """How well a product answers the request, independent of any platform.
+
+    Deliberately not the composite score from _score_candidate: that normalises
+    its price term against the lowest total within one platform's own candidate
+    list, so composite scores are not comparable between platforms.
+    """
+    query_tokens = _tokens(f"{item.search_term} {item.context}")
+    name_tokens = _tokens(product.name)
+    return len(query_tokens & name_tokens) / max(1, len(query_tokens))
+
+
+def _stated_reference(item: PlannedItem) -> tuple[float, str] | None:
+    """The amount the request actually asked for, or None if it never said.
+
+    ``unit`` defaults to "item", so requested_measurement reports (1, "count")
+    for a line that stated no quantity at all. Treating that as a real request
+    would compare a 250 g pack against a 500 g pack as though both satisfied it.
+    """
+    if item.unit.casefold() == "item":
+        return None
+    return requested_measurement(item)
+
+
+def _supply_within_band(
+    item: PlannedItem,
+    candidates: list[Product],
+    reference: tuple[float, str],
+    settings: Settings,
+) -> tuple[Product, int] | None:
+    """The best candidate delivering the reference amount, or None."""
+    amount, dimension = reference
+    if amount <= 0:
+        return None
+    best: tuple[tuple[float, float, int], Product, int] | None = None
+    for position, candidate in enumerate(candidates):
+        if not candidate.in_stock or not _match_is_reasonable(item, candidate)[0]:
+            continue
+        packed = parse_measurement(candidate.pack_size or candidate.name)
+        if not packed or packed[1] != dimension or packed[0] <= 0:
+            continue
+        units = max(1, round(amount / packed[0]))
+        ratio = (packed[0] * units) / amount
+        if ratio < settings.min_fill_ratio or ratio > settings.max_fill_ratio:
+            continue
+        key = (
+            _request_relevance(item, candidate),
+            -(candidate.price * units),
+            -position,
+        )
+        if best is None or key > best[0]:
+            best = (key, candidate, units)
+    return None if best is None else (best[1], best[2])
+
+
+def _comparable_references(
+    item: PlannedItem,
+    candidates_by_provider: dict[str, list[Product]],
+) -> list[tuple[float, str]]:
+    """Every amount some platform could actually supply, de-duplicated."""
+    seen: dict[tuple[float, str], None] = {}
+    for candidates in candidates_by_provider.values():
+        for candidate in candidates:
+            if not candidate.in_stock or not _match_is_reasonable(item, candidate)[0]:
+                continue
+            packed = parse_measurement(candidate.pack_size or candidate.name)
+            if packed and packed[0] > 0:
+                seen.setdefault(packed, None)
+    return list(seen)
 
 
 def _fallback_cross_match(
     item: PlannedItem,
     candidates_by_provider: dict[str, list[Product]],
+    settings: Settings,
 ) -> CrossPlatformMatch:
-    picks = {
+    independent = {
         provider: _fallback_match(item, candidates)
         for provider, candidates in candidates_by_provider.items()
     }
-    missing = sorted(p for p, d in picks.items() if d.product_id is None)
-    note = (
-        f"No equivalent found on {', '.join(missing)}."
-        if missing
-        else "Matched independently on each platform."
-    )
+
+    # A comparison is only meaningful when every platform supplies the same
+    # amount. When the request states one, that is the reference. When it does
+    # not, the catalogue supplies it: prefer the amount the most platforms can
+    # actually match, so the comparison covers as many of them as possible.
+    stated = _stated_reference(item)
+    references = [stated] if stated else _comparable_references(item, candidates_by_provider)
+
+    Supply = dict[str, tuple[Product, int] | None]
+    best: tuple[tuple[int, float, float], tuple[float, str], Supply] | None = None
+    for reference in references:
+        supplied: Supply = {
+            provider: _supply_within_band(item, candidates, reference, settings)
+            for provider, candidates in candidates_by_provider.items()
+        }
+        matched = [entry for entry in supplied.values() if entry is not None]
+        key = (
+            len(matched),
+            sum(_request_relevance(item, product) for product, _ in matched),
+            -sum(product.price * units for product, units in matched),
+        )
+        if best is None or key > best[0]:
+            best = (key, reference, supplied)
+
+    # Nothing measurable to compare on — loose items, pieces, unparsed packs.
+    # Independent matching is the honest answer rather than a forced refusal.
+    if best is None or best[0][0] == 0:
+        missing = sorted(p for p, d in independent.items() if d.product_id is None)
+        note = (
+            f"No equivalent found on {', '.join(missing)}."
+            if missing
+            else "Matched independently on each platform."
+        )
+        return CrossPlatformMatch(picks=independent, equivalence_note=note)
+
+    _, (amount, dimension), supply = best
+    picks: dict[str, MatchDecision] = {}
+    for provider, entry in supply.items():
+        if entry is None:
+            picks[provider] = MatchDecision(
+                product_id=None,
+                units_to_add=0,
+                reason=(
+                    "No product here matches the amount the other platforms "
+                    "supply, so comparing prices would be misleading."
+                ),
+            )
+            continue
+        product, units = entry
+        picks[provider] = MatchDecision(
+            product_id=product.id,
+            units_to_add=units,
+            reason=(
+                f"Comparable supply: {units} × {product.pack_size or product.name} "
+                f"for ₹{product.price * units:g}."
+            ),
+        )
+
+    missing = sorted(provider for provider, entry in supply.items() if entry is None)
+    note = f"Compared on {amount:g} {dimension}."
+    if missing:
+        note += f" No equivalent amount on {', '.join(missing)}."
     return CrossPlatformMatch(picks=picks, equivalence_note=note)

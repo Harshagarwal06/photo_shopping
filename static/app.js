@@ -526,16 +526,39 @@ function comparisonOutcomeMarkup(outcome, winner) {
           />
         </span>`
       : "";
+    // The amount a platform actually supplies is the whole basis of the
+    // comparison: "2 × 250 g" and "1 × 500 g" cost different amounts for the
+    // same groceries. Pack size used to appear only inside truncated dropdown
+    // text, which is where a 250 g against 500 g mismatch stayed invisible.
+    const selected = draftItem?.candidates?.find(
+      (candidate) => candidate.id === line.product_id,
+    );
+    const supply = selected?.pack_size
+      ? `${escapeHtml(line.quantity)} × ${escapeHtml(selected.pack_size)}`
+      : `${escapeHtml(line.quantity)} × pack`;
     return `
     <li>
       <span>
         <strong>${escapeHtml(line.name)}</strong>
-        <small>${escapeHtml(line.quantity)} × ${money.format(line.unit_price)}</small>
+        <small>${supply} · ${money.format(line.unit_price)} each</small>
         ${editor}
       </span>
       <span>${money.format(line.line_total)}</span>
     </li>`;
   }).join("");
+
+  // A platform with no comparable product is not the same as a platform that
+  // simply lost on price, and it must not read as an empty gap in the column.
+  const unmatchedLines = (draft?.items ?? [])
+    .filter((item) => !item.removed && !item.selected_product_id)
+    .map((item) => `
+    <li class="comparison-line-unmatched">
+      <span>
+        <strong>${escapeHtml(item.planned.search_term)}</strong>
+        <small>${escapeHtml(item.reason || "No comparable product on this platform.")}</small>
+      </span>
+      <span>—</span>
+    </li>`).join("");
   const feeLines = summary.fees.map((fee) => `
     <li><span>${escapeHtml(fee.label)}</span><span>${money.format(fee.amount)}</span></li>`
   ).join("");
@@ -555,7 +578,7 @@ function comparisonOutcomeMarkup(outcome, winner) {
         <span class="comparison-coverage">${escapeHtml(coverage)}</span>
         ${summary.estimated ? '<span class="comparison-estimate">Estimated fees</span>' : '<span class="comparison-status">Verified cart total</span>'}
       </header>
-      <ul class="comparison-lines">${itemLines || "<li><span>No matched products</span><span>—</span></li>"}</ul>
+      <ul class="comparison-lines">${itemLines + unmatchedLines || "<li><span>No matched products</span><span>—</span></li>"}</ul>
       ${warnings.length ? `<div class="coverage-warnings">${warnings.map((warning) => `<p>${escapeHtml(warning)}</p>`).join("")}</div>` : ""}
       <ul class="bill-lines">
         <li><span>Item subtotal</span><span>${money.format(summary.subtotal)}</span></li>
