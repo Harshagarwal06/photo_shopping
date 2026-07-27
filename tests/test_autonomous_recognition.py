@@ -123,6 +123,71 @@ def test_unresolved_line_is_skipped_without_forcing_product():
     assert "safely skipped 1 uncertain line" in result.processing_note
 
 
+def test_one_available_catalogue_can_support_a_semantically_valid_line():
+    local = PlannedItem(
+        id="line",
+        search_term="shower gel",
+        raw_text="1. Shawer gel",
+        confidence=0.75,
+        needs_review=True,
+    )
+    cloud = local.model_copy(
+        deep=True,
+        update={"search_term": "shower gel", "confidence": 0.65},
+    )
+    provider = CatalogProvider(
+        "blinkit",
+        [_product("blinkit", "Fiama Shower Gel")],
+    )
+
+    result = asyncio.run(
+        resolve_plan_autonomously(
+            CartPlan(items=[local]),
+            CartPlan(items=[cloud]),
+            {"blinkit": provider},
+            _settings(),
+        )
+    )
+
+    assert result.items[0].recognition_decision == "accepted"
+    assert result.items[0].needs_review is False
+
+
+def test_one_catalogue_corrects_brand_only_with_two_engine_prefixes_and_repetition():
+    local = PlannedItem(
+        id="line",
+        search_term="Ma",
+        raw_text="5. Ma",
+        confidence=0.15,
+        needs_review=True,
+    )
+    cloud = local.model_copy(
+        deep=True,
+        update={"search_term": "Mag", "raw_text": "Mag", "confidence": 0.65},
+    )
+    provider = CatalogProvider(
+        "blinkit",
+        [
+            _product("blinkit", "Maggi 2-Minute Noodles"),
+            _product("blinkit", "Maggi Masala Noodles"),
+        ],
+    )
+
+    result = asyncio.run(
+        resolve_plan_autonomously(
+            CartPlan(items=[local]),
+            CartPlan(items=[cloud]),
+            {"blinkit": provider},
+            _settings(),
+        )
+    )
+
+    item = result.items[0]
+    assert item.provider_query == "Maggi"
+    assert item.recognition_decision == "catalog_corrected"
+    assert item.needs_review is False
+
+
 def test_two_provider_brand_consensus_corrects_close_ocr_typo():
     local = PlannedItem(
         id="line",

@@ -151,6 +151,15 @@ def test_provider_order_can_resolve_a_close_typo_but_not_an_unrelated_result():
     assert "No confident" in unrelated.reason
 
 
+def test_a_short_brand_prefix_is_not_accepted_as_a_complete_query():
+    decision = _fallback_match(
+        PlannedItem(search_term="Mag"),
+        [_product("maggi", "Maggi 2-Minute Noodles", 20)],
+    )
+
+    assert decision.product_id is None
+
+
 def test_brand_and_product_modifier_must_survive_matching():
     branded = PlannedItem(search_term="mixed fruit juice", context="Real")
     brand_decision = _fallback_match(
@@ -208,6 +217,18 @@ def test_rin_soap_matches_its_detergent_bar_without_weakening_generic_soap():
     # The equivalence is intentionally brand-scoped: an unbranded bathing-soap
     # request must not silently become laundry detergent.
     assert _fallback_match(PlannedItem(search_term="soap"), candidates).product_id == "pears"
+
+
+def test_nail_polish_matches_retail_paint_and_enamel_names():
+    candidates = [
+        _product("paint", "Miss Nails Nail Paint", 99),
+        _product("enamel", "Faces Canada Nail Enamel", 149),
+    ]
+
+    assert (
+        _fallback_match(PlannedItem(search_term="nail polish"), candidates).product_id
+        == "paint"
+    )
 
 
 def test_uncertain_transcription_is_never_matched_until_confirmed():

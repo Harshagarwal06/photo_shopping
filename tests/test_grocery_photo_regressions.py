@@ -1,4 +1,4 @@
-"""End-to-end regressions from the two user-supplied handwritten grocery lists."""
+"""End-to-end regressions from the user-supplied handwritten grocery lists."""
 
 import shutil
 import sys
@@ -80,3 +80,15 @@ def test_brand_heavy_numbered_list_has_eight_stable_separate_rows():
     # Candidate ordering and the review gate must not change between identical
     # reads of the same photograph.
     assert structured("grocery_list_brands.jpeg") == expected
+
+
+@requires_vision
+def test_personal_care_and_grocery_list_preserves_ordinals_and_brand():
+    assert structured("grocery_list_personal_care.jpeg") == [
+        ("shower gel", "", 1, "item", False),
+        ("nail polish", "", 1, "item", False),
+        ("penne pasta", "", 1, "item", False),
+        ("ice cream cone chocolate", "havmor", 1, "item", False),
+        ("onion", "", 1, "kg", False),
+        ("brown sugar", "", 1, "item", False),
+    ]

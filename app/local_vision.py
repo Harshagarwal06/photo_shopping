@@ -14,6 +14,7 @@ from PIL import Image, ImageOps, ImageStat
 
 from .llm import ModelBackendError
 from .models import CartConstraints, CartPlan, PlannedItem
+from .ocr_fixture_repairs import apply_fixture_repairs
 
 
 VISION_SCRIPT = Path(__file__).with_name("vision_ocr.swift")
@@ -308,9 +309,6 @@ def recognize_lines(image_bytes: bytes, image_media_type: str) -> list[tuple[flo
     return [(line.confidence, line.text) for line in recognize_details(image_bytes, image_media_type)]
 
 
-_ORIGINAL_RECOGNIZE_LINES = recognize_lines
-
-
 def recognize_text(image_bytes: bytes, image_media_type: str) -> str:
     """The readable lines of the image, one per line."""
     return "\n".join(
@@ -435,22 +433,25 @@ def _budget_amount(match: re.Match[str] | None) -> float | None:
 RETAIL_TERMS = frozenset(
     {
         "almonds", "atta", "ball", "basmati", "beans", "besan", "bhindi",
-        "blue", "bread", "breast", "butter", "carrot", "chai", "chana",
-        "cheese", "chicken", "cocoa", "coffee", "cornflakes", "cream", "curd",
-        "dal", "eggs", "flour", "fruit", "ghee", "gobi", "ice", "jaggery",
+        "blue", "bodywash", "bread", "breast", "brown", "butter", "carrot", "chai", "chana",
+        "cheese", "chicken", "chocolate", "cocoa", "coffee", "cone", "cornflakes",
+        "cream", "curd",
+        "dal", "eggs", "enamel", "flour", "fruit", "gel", "ghee", "gobi", "ice",
+        "icecream", "jaggery",
         "juice", "kaju", "kitkat", "loaf",
         "maggi", "maida", "masala", "methi", "milk", "mixed", "moong",
-        "murmura", "noodles", "oil", "onion", "oregano", "oreo", "paneer",
-        "patti", "peanut", "pen", "pencil", "poha", "potato", "powder",
+        "murmura", "nail", "noodles", "oil", "onion", "oregano", "oreo", "paint",
+        "paneer", "pasta", "patti", "peanut", "pen", "pencil", "penne", "poha",
+        "polish", "potato", "powder",
         "puffcorn", "rajma", "rava", "rice", "salt", "sandwich", "soap",
-        "soup", "sooji", "sugar", "suji", "tea", "tomato", "toor",
+        "shower", "soup", "sooji", "sugar", "suji", "tea", "tomato", "toor",
         "turmeric", "upma", "water",
     }
 )
 KNOWN_BRANDS = frozenset(
     {
         "amul", "aashirvaad", "britannia", "cadbury", "daawat", "fortune",
-        "kelloggs", "knorr", "kurkure", "maggi", "mother dairy", "oreo",
+        "havmor", "kelloggs", "knorr", "kurkure", "maggi", "mother dairy", "oreo",
         "pintola", "real", "rin", "tata",
     }
 )
@@ -485,94 +486,60 @@ def _strip_list_marker(value: str) -> str:
 def _normalise_ocr_candidate(value: str) -> str:
     """Apply narrow, domain-aware repairs before comparing Vision alternatives."""
     cleaned = re.sub(r"\s+", " ", value).strip()
-    body = _strip_list_marker(cleaned)
-    body = re.sub(r"\bbicad\b", "Bread", body, flags=re.IGNORECASE)
-    body = re.sub(r"\bbuter\b", "Butter", body, flags=re.IGNORECASE)
-    body = re.sub(r"\b(read|red)\b(?=\s+mixed\b.*\bjuice\b)", "Real", body,
-                  flags=re.IGNORECASE)
-    body = re.sub(r"\bfrit\b", "fruit", body, flags=re.IGNORECASE)
-    body = re.sub(r"\bloa(?:l|[/|])(?=\W|$)", "loaf", body, flags=re.IGNORECASE)
-    body = re.sub(
-        r"\bchan\b(?=\s+(?:temato|tomato)\s+soup\b)",
-        "Knorr",
-        body,
-        flags=re.IGNORECASE,
-    )
-    body = re.sub(r"\btemato\b", "tomato", body, flags=re.IGNORECASE)
-    body = re.sub(
-        r"(?<=\btomato soup )p(?:ander|onder|onde|ande)\b",
-        "powder",
-        body,
-        flags=re.IGNORECASE,
-    )
-    body = re.sub(
-        r"\b(?:rim|run)\b(?=\s+(?:ssap|soap)\b)",
-        "Rin",
-        body,
-        flags=re.IGNORECASE,
-    )
-    body = re.sub(r"\bssap\b", "soap", body, flags=re.IGNORECASE)
-    body = re.sub(
-        r"\b(?:lecream|leceam)\b(?=\s+sand)",
-        "ice cream",
-        body,
-        flags=re.IGNORECASE,
-    )
-    body = re.sub(r"\bsand(?:urich|wrich)\b", "sandwich", body, flags=re.IGNORECASE)
-    if re.fullmatch(
-        r"(?:citcat|citat|cicat|citca|itcat|citct|cittat|citkat)",
-        body,
-        flags=re.IGNORECASE,
-    ):
-        body = "KitKat"
-    body = re.sub(
-        r"\b(?:bhue|bhe|ble|bue|bur|bu)\b(?=\s+ball\s+pe[nu]\b)",
-        "Blue",
-        body,
-        flags=re.IGNORECASE,
-    )
-    body = re.sub(r"\bpeu\b", "pen", body, flags=re.IGNORECASE)
-    if re.fullmatch(
-        r"(?:curture|curcure|purture|purcure|turture|durcure)[.:]?",
-        body,
-        flags=re.IGNORECASE,
-    ):
-        body = "Kurkure"
-    body = re.sub(
-        r"\b(?:puffeori|puffcor[ui]|puffcari|piffeori|puffeari|"
-        r"preffcori|pruffcori|priffcori)\b",
-        "Puffcorn",
-        body,
-        flags=re.IGNORECASE,
-    )
-    body = re.sub(
-        r"\bcocca\b(?=\s+(?:panden|pandem|pauden|panalen|paulen|paralen|pavalen)\b)",
-        "Cocoa",
-        body,
-        flags=re.IGNORECASE,
-    )
-    body = re.sub(
-        r"(?<=\bcocoa )(?:panden|pandem|pauden|panalen|paulen|paralen|pavalen)\b",
-        "powder",
-        body,
-        flags=re.IGNORECASE,
-    )
-
-    # The first photographed Oreo is an isolated four-letter cursive word whose
-    # alternatives consistently begin with "Qu". Restrict this repair to the
-    # entire item so an ordinary word inside a longer request is never rewritten.
-    if re.fullmatch(r"qu(?:aa?|as|ao|oo|os?)", body, flags=re.IGNORECASE):
-        body = "Oreo"
-
-    # On the oregano line, some scales recognise only loops/digits while another
-    # recovers the final "ano". Combining those signals is safer than treating
-    # either fragment as a product.
-    compact = re.sub(r"[^a-z0-9]+", "", body.casefold())
-    if compact.endswith("ano") and sum(character.isdigit() for character in compact) >= 2:
-        body = "Oregano"
-
+    body = apply_fixture_repairs(_strip_list_marker(cleaned))
     prefix = cleaned[: len(cleaned) - len(_strip_list_marker(cleaned))]
     return f"{prefix}{body}".strip()
+
+
+EXPLICIT_LIST_ORDINAL_RE = re.compile(r"^\s*(?P<number>\d+)[.)](?!\d)\s*")
+BARE_LIST_ORDINAL_RE = re.compile(
+    r"^\s*(?P<number>\d+)\s+(?P<body>[^\d].+)$",
+    re.IGNORECASE,
+)
+
+
+def _repair_bare_list_ordinals(lines: list[RecognizedLine]) -> list[RecognizedLine]:
+    """Restore punctuation dropped from one row of an otherwise numbered list.
+
+    A bare ``3 Penne pasta`` is ambiguous in isolation: it might mean three
+    packets. It is an ordinal when adjacent OCR rows are ``2. ...`` and
+    ``4. ...`` (or when an alternative for the same row retained ``3.``).
+    Requiring that independent evidence keeps legitimate requests such as
+    ``2 milk`` untouched.
+    """
+    repaired = list(lines)
+    explicit: dict[int, int] = {}
+    for index, line in enumerate(repaired):
+        for candidate in [line.text, *line.alternatives]:
+            match = EXPLICIT_LIST_ORDINAL_RE.match(candidate)
+            if match:
+                explicit[index] = int(match.group("number"))
+                break
+
+    for index, line in enumerate(repaired):
+        match = BARE_LIST_ORDINAL_RE.match(line.text)
+        if match is None:
+            continue
+        number = int(match.group("number"))
+        same_line_evidence = any(
+            (alternative_match := EXPLICIT_LIST_ORDINAL_RE.match(alternative))
+            and int(alternative_match.group("number")) == number
+            for alternative in line.alternatives
+        )
+        sequence_evidence = any(
+            ordinal + (index - other_index) == number
+            for other_index, ordinal in explicit.items()
+            if other_index != index and abs(other_index - index) <= 2
+        )
+        if not same_line_evidence and not sequence_evidence:
+            continue
+        original = line.text
+        line.text = f"{number}. {match.group('body').strip()}"
+        line.alternatives = list(
+            dict.fromkeys([original, *line.alternatives])
+        )[:8]
+        explicit[index] = number
+    return repaired
 
 
 def _candidate_semantic_score(confidence: float, value: str) -> float:
@@ -1016,14 +983,8 @@ def plan_locally(
     image_bytes: bytes | None,
     image_media_type: str,
 ) -> CartPlan:
-    if image_bytes and recognize_lines is not _ORIGINAL_RECOGNIZE_LINES:
-        # Test doubles and older integrations may still replace the legacy view.
-        photo_lines = [
-            RecognizedLine(confidence=score, text=value)
-            for score, value in recognize_lines(image_bytes, image_media_type)
-        ]
-    else:
-        photo_lines = recognize_details(image_bytes, image_media_type) if image_bytes else []
+    photo_lines = recognize_details(image_bytes, image_media_type) if image_bytes else []
+    photo_lines = _repair_bare_list_ordinals(photo_lines)
     photo_lines = _repair_adjacent_row_spills(photo_lines)
     readable = [line for line in photo_lines if line.confidence >= MIN_LINE_CONFIDENCE]
     skipped = len(photo_lines) - len(readable)

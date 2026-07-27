@@ -137,12 +137,12 @@ def enforce_constraints(
             # Imported lazily because matcher imports this module for quantity
             # arithmetic. The same fail-closed relevance gate must also apply to
             # cap-driven replacements.
-            from .matcher import _match_is_reasonable
+            from .matcher import match_is_reasonable
 
             for candidate in item.candidates:
                 if not candidate.in_stock:
                     continue
-                if not _match_is_reasonable(item.planned, candidate)[0]:
+                if not match_is_reasonable(item.planned, candidate)[0]:
                     continue
                 units = units_for_candidate(item.planned, candidate)
                 if candidate.price * units <= cap:

@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     autonomous_accept_confidence: float = Field(default=0.88, ge=0.5, le=1)
     autonomous_catalog_confidence: float = Field(default=0.70, ge=0.5, le=1)
     autonomous_catalog_min_providers: int = Field(default=2, ge=1, le=3)
-    autonomous_max_hypotheses: int = Field(default=3, ge=1, le=5)
+    autonomous_max_hypotheses: int = Field(default=2, ge=1, le=5)
     local_vision_fallback: bool = True
 
     grocery_provider: Literal["blinkit", "instamart", "zepto"] = "blinkit"
@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     eta_tiebreak_rupees: float = Field(default=20.0, ge=0)
     comparison_confirmation_ttl_seconds: int = Field(default=300, ge=30, le=1800)
     max_state_records: int = Field(default=200, ge=10, le=5000)
+    # Long enough to cover recognition searching a query and the draft or
+    # comparison run searching it again moments later. 0 disables the cache.
+    search_cache_ttl_seconds: float = Field(default=90.0, ge=0, le=900)
     order_history_limit: int = Field(default=5, ge=0, le=20)
     search_result_limit: int = Field(default=5, ge=1, le=10)
     navigation_timeout_ms: int = Field(default=30_000, ge=5_000)

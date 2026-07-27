@@ -1,6 +1,11 @@
 import pytest
 
-from app.local_vision import _parse_item, plan_locally
+from app.local_vision import (
+    RecognizedLine,
+    _normalise_ocr_candidate,
+    _parse_item,
+    plan_locally,
+)
 
 
 @pytest.mark.parametrize(
@@ -283,8 +288,11 @@ def test_unusable_or_negative_quantity_is_rejected(line):
 
 def test_local_planner_combines_typed_and_recognized_items(monkeypatch):
     monkeypatch.setattr(
-        "app.local_vision.recognize_lines",
-        lambda _bytes, _media_type: [(1.0, "12 eggs"), (1.0, "rice 2 kg")],
+        "app.local_vision.recognize_details",
+        lambda _bytes, _media_type: [
+            RecognizedLine(confidence=1.0, text="12 eggs"),
+            RecognizedLine(confidence=1.0, text="rice 2 kg"),
+        ],
     )
 
     plan = plan_locally(
@@ -297,6 +305,54 @@ def test_local_planner_combines_typed_and_recognized_items(monkeypatch):
     assert [item.quantity for item in plan.items] == [2, 12, 2]
     assert plan.constraints.cart_budget == 800
     assert "locally on this Mac" in plan.processing_note
+
+
+def test_a_dropped_list_dot_is_not_mistaken_for_product_quantity(monkeypatch):
+    monkeypatch.setattr(
+        "app.local_vision.recognize_details",
+        lambda _bytes, _media_type: [
+            RecognizedLine(confidence=1.0, text="1. Shower gel"),
+            RecognizedLine(confidence=1.0, text="2. Nail polish"),
+            RecognizedLine(confidence=1.0, text="3 Penne pasta"),
+            RecognizedLine(confidence=1.0, text="4. Brown sugar"),
+        ],
+    )
+
+    plan = plan_locally(
+        text="",
+        image_bytes=b"image",
+        image_media_type="image/jpeg",
+    )
+
+    penne = next(item for item in plan.items if item.search_term == "Penne pasta")
+    assert (penne.quantity, penne.unit) == (1, "item")
+
+
+def test_a_bare_quantity_is_preserved_without_numbered_list_evidence(monkeypatch):
+    monkeypatch.setattr(
+        "app.local_vision.recognize_details",
+        lambda _bytes, _media_type: [RecognizedLine(confidence=1.0, text="2 milk")],
+    )
+
+    plan = plan_locally(
+        text="",
+        image_bytes=b"image",
+        image_media_type="image/jpeg",
+    )
+
+    assert (plan.items[0].search_term, plan.items[0].quantity) == ("milk", 2)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("2. Nail pohah", "2. Nail polish"),
+        ("4. Harmar icecream come chocolate", "4. Havmor ice cream cone chocolate"),
+        ("& Brews sugar", "Brown sugar"),
+    ],
+)
+def test_phrase_scoped_repairs_for_latest_handwritten_list(raw, expected):
+    assert _normalise_ocr_candidate(raw) == expected
 
 
 @pytest.mark.parametrize(
@@ -404,11 +460,11 @@ def test_unreadable_lines_are_skipped_and_disclosed(monkeypatch):
     """An illegible line is read as a confident wrong word and becomes a real
     product, so it is dropped — but never silently."""
     monkeypatch.setattr(
-        "app.local_vision.recognize_lines",
+        "app.local_vision.recognize_details",
         lambda _bytes, _media_type: [
-            (1.0, "milk 2 l"),
-            (0.3, "Leach ba to gara"),
-            (0.3, "aditate:"),
+            RecognizedLine(confidence=1.0, text="milk 2 l"),
+            RecognizedLine(confidence=0.3, text="Leach ba to gara"),
+            RecognizedLine(confidence=0.3, text="aditate:"),
         ],
     )
 

@@ -19,6 +19,7 @@ from .models import (
     StreamEvent,
 )
 from .providers.base import GroceryProvider
+from .search_cache import cached_search
 
 
 EventSink = Callable[[StreamEvent], None] | None
@@ -34,6 +35,7 @@ async def _search_platform(
     provider: GroceryProvider,
     plan: CartPlan,
     on_event: EventSink,
+    settings: Settings,
 ) -> dict[str, list]:
     """Search every planned item on one platform. Items stay sequential."""
     results = {}
@@ -50,7 +52,7 @@ async def _search_platform(
         _emit(on_event, "retrieval",
               f"Searching {provider.display_name} for {item.provider_query} "
               f"({index}/{len(plan.items)})…", provider.provider_id)
-        results[item.id] = await provider.search(item.provider_query)
+        results[item.id] = await cached_search(provider, item.provider_query, settings)
     return results
 
 
@@ -67,7 +69,10 @@ async def run_comparison(
     """Build the same basket everywhere and rank the resulting real totals."""
     # 1. Search every platform concurrently.
     searches = await asyncio.gather(
-        *(_search_platform(provider, plan, on_event) for provider in providers.values()),
+        *(
+            _search_platform(provider, plan, on_event, settings)
+            for provider in providers.values()
+        ),
         return_exceptions=True,
     )
 

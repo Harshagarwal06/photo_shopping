@@ -5,9 +5,16 @@ Date: 27 July 2026
 ## Executive summary
 
 The project is strong on cart safety, exact quantities, review-before-search, and
-provider abstraction. All three supplied handwriting fixtures are exact on their
-clear original images, the captured real-result ranking corpus is 19/19, and the
+provider abstraction. The captured real-result ranking corpus is 19/19 and the
 complete automated suite contains 292 tests.
+
+The supplied handwriting fixtures are exact on their clear original images, but
+that number should not be read as handwriting accuracy. Part of it is carried by
+`app/ocr_fixture_repairs.py`, a table of literal corrections transcribed from
+these specific photographs — measured against them, it is exact by construction.
+Accuracy on handwriting is only measurable on photographs the table has never
+seen, and no such measurement exists yet. Establishing one, on a set of lists
+nobody has tuned against, is the highest-value next step for this area.
 
 The largest remaining product risk is degraded photography. Moderate tilt, low
 contrast, darkness, and low resolution still reduce exact transcription. The new
@@ -26,11 +33,16 @@ caching, and backoff should become a first-class subsystem.
 
 ### Handwriting and image quality
 
+The originals below are tuned-against photographs: `ocr_fixture_repairs.py` holds
+corrections written by reading these exact images. Treat their rows as "no
+regression on a known input", not as accuracy. The degraded rows are more
+informative, because the degradations were not individually tuned for.
+
 | Scenario | Evidence after improvements |
 | --- | --- |
-| Original quantity-heavy photo | Exact structured list |
-| Original numbered photo | Seven intended rows; truncated `Ma` quarantined |
-| Original brand-heavy photo | 8/8 exact, repeatable |
+| Original quantity-heavy photo (tuned against) | Exact structured list |
+| Original numbered photo (tuned against) | Seven intended rows; truncated `Ma` quarantined |
+| Original brand-heavy photo (tuned against) | 8/8, repeatable |
 | +4° physical rotation | Accuracy floor 4/8; probable merged categories require review |
 | -8° physical rotation | Accuracy floor 5/8 |
 | 55% contrast | Accuracy floor 5/8 after automatic enhancement |
@@ -127,7 +139,31 @@ Read-only live checks were performed:
 9. MIME/decode validation, local-origin protection, and bounded in-memory state.
 10. Real-result ranking quality raised to 19/19.
 
+## Fixed after the first review of this work
+
+1. Catalogue brand correction no longer rewrites words the grocery lexicon
+   already knows, and its reported confidence is measured rather than pinned.
+2. Typed text is no longer adjudicated as uncertain OCR when a photo is attached.
+3. Pillow floor raised to 12, where `get_flattened_data` exists.
+4. Short-lived provider search cache, so recognition and the run after it no
+   longer fetch the same query twice.
+5. Recognition search failures are logged instead of silently becoming "no
+   catalogue evidence".
+6. HEIC/HEIF uploads are checked for a real container instead of being trusted.
+7. The memorised fixture repairs are isolated in `app/ocr_fixture_repairs.py`,
+   capped, and documented as memorisation rather than accuracy.
+
 ## Remaining risks and next steps
+
+### P1 — Measure handwriting on photographs nobody tuned against
+
+The fixture results above are tuned-against, so they cannot answer "how well does
+this read handwriting?". Collect a held-out set of lists — different hands, papers,
+and phones — that no correction in `ocr_fixture_repairs.py` was written for, and
+report exact-line accuracy on it. Expect the first number to be well below the
+fixture results; that gap is the real state of the feature, and it is what tells
+you whether the domain prior and candidate ranking are improving or only the
+memorised table is growing.
 
 ### P1 — Capture-quality gate and row-level OCR
 
@@ -144,7 +180,7 @@ Introduce a provider search scheduler with:
 
 - per-provider pacing;
 - exponential backoff with jitter;
-- short-lived query-result caching;
+- ~~short-lived query-result caching~~ — done, `app/search_cache.py`;
 - one visible retry action per failed item;
 - a circuit breaker after repeated empty/throttled pages;
 - selector-contract monitoring against saved provider HTML.

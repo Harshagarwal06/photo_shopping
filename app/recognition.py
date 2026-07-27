@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 
 from .config import Settings
 from .local_vision import KNOWN_TERMS, _normalise_ocr_candidate, _parse_item
-from .matcher import _match_is_reasonable
+from .matcher import match_is_reasonable
 from .models import CartPlan, PlannedItem, Product, PROVIDER_QUERY_BRANDS
 from .providers.base import GroceryProvider
+from .search_cache import cached_search
 
+
+logger = logging.getLogger(__name__)
 
 TOKEN_RE = re.compile(r"[a-z0-9]+")
 # Genuine OCR brand typos measure around 0.67-0.75 against the brand they meant,
@@ -20,6 +24,7 @@ TOKEN_RE = re.compile(r"[a-z0-9]+")
 # not this number, is what keeps real grocery words from being "corrected".
 BRAND_TYPO_SIMILARITY = 0.62
 BRAND_LABELS = {
+    "havmor": "Havmor",
     "kitkat": "KitKat",
     "mother dairy": "Mother Dairy",
 }
@@ -119,6 +124,7 @@ def _build_hypotheses(
 async def _search_hypotheses(
     providers: dict[str, GroceryProvider],
     hypotheses: list[_Hypothesis],
+    settings: Settings,
 ) -> dict[str, dict[str, list[Product]]]:
     queries = list(dict.fromkeys(hypothesis.item.provider_query for hypothesis in hypotheses))
 
@@ -129,10 +135,19 @@ async def _search_hypotheses(
         results: dict[str, list[Product]] = {}
         for query in queries:
             try:
-                results[query] = await provider.search(query)
+                results[query] = await cached_search(provider, query, settings)
             except Exception:
                 # Autonomous recognition must remain available when one provider
-                # is disconnected or temporarily unhealthy.
+                # is disconnected or temporarily unhealthy. Logged rather than
+                # discarded, so a provider that is failing every query is not
+                # indistinguishable from one that simply has no stock.
+                logger.warning(
+                    "Recognition search failed on %s for %r; treating as no "
+                    "catalogue evidence.",
+                    provider_id,
+                    query,
+                    exc_info=True,
+                )
                 results[query] = []
         return provider_id, results
 
@@ -151,7 +166,7 @@ def _catalog_hits(
     )
     return sum(
         any(
-            product.in_stock and _match_is_reasonable(probe, product)[0]
+            product.in_stock and match_is_reasonable(probe, product)[0]
             for product in provider_results.get(hypothesis.item.provider_query, [])
         )
         for provider_results in search_results.values()
@@ -190,12 +205,30 @@ def _closest_brand_typo(hypotheses: list[_Hypothesis], brand: str) -> tuple[str,
     return best
 
 
+def _independent_brand_prefix_support(
+    hypotheses: list[_Hypothesis],
+    brand: str,
+) -> int:
+    """Count independent engines that read a meaningful prefix of ``brand``."""
+    supported_sources: set[str] = set()
+    for hypothesis in hypotheses:
+        if hypothesis.source not in {"local", "cloud"}:
+            continue
+        if any(
+            len(token) >= 2 and brand.startswith(token)
+            for token in _tokens(hypothesis.item.provider_query)
+        ):
+            supported_sources.add(hypothesis.source)
+    return len(supported_sources)
+
+
 def _catalog_brand_correction(
     hypotheses: list[_Hypothesis],
     search_results: dict[str, dict[str, list[Product]]],
     settings: Settings,
 ) -> _Hypothesis | None:
     provider_votes: dict[str, set[str]] = {}
+    provider_products: dict[str, dict[str, set[str]]] = {}
     for provider_id, query_results in search_results.items():
         provider_brands: set[str] = set()
         for products in query_results.values():
@@ -203,16 +236,34 @@ def _catalog_brand_correction(
                 brand = _brand_from_name(product.name)
                 if brand:
                     provider_brands.add(brand)
+                    provider_products.setdefault(brand, {}).setdefault(
+                        provider_id, set()
+                    ).add(product.id)
         for brand in provider_brands:
             provider_votes.setdefault(brand, set()).add(provider_id)
 
-    typos = {
-        brand: closest
-        for brand, voters in provider_votes.items()
-        if len(voters) >= settings.autonomous_catalog_min_providers
-        and (closest := _closest_brand_typo(hypotheses, brand)) is not None
-        and closest[1] >= BRAND_TYPO_SIMILARITY
-    }
+    quorum = min(
+        settings.autonomous_catalog_min_providers,
+        max(1, len(search_results)),
+    )
+    typos: dict[str, tuple[str, float]] = {}
+    for brand, voters in provider_votes.items():
+        if len(voters) < quorum:
+            continue
+        closest = _closest_brand_typo(hypotheses, brand)
+        if closest is None or closest[1] < BRAND_TYPO_SIMILARITY:
+            continue
+        if quorum == 1:
+            # One catalogue is enough only with two other independent signals:
+            # both OCR engines saw the brand prefix, and at least two distinct
+            # top products repeat that brand. This turns Ma/Mag into Maggi
+            # without letting a single broad search result invent a brand.
+            if _independent_brand_prefix_support(hypotheses, brand) < 2:
+                continue
+            provider_id = next(iter(voters))
+            if len(provider_products.get(brand, {}).get(provider_id, set())) < 2:
+                continue
+        typos[brand] = closest
     if not typos:
         return None
     votes, brand = max(
@@ -305,7 +356,7 @@ async def resolve_plan_autonomously(
             continue
         cloud = cloud_by_id.get(local.id)
         hypotheses = _build_hypotheses(local, cloud, settings)
-        search_results = await _search_hypotheses(providers, hypotheses)
+        search_results = await _search_hypotheses(providers, hypotheses, settings)
         for hypothesis in hypotheses:
             hypothesis.catalog_hits = _catalog_hits(hypothesis, search_results)
         catalog_correction = _catalog_brand_correction(
@@ -315,8 +366,16 @@ async def resolve_plan_autonomously(
             hypotheses.append(catalog_correction)
         _score_hypotheses(hypotheses, len(providers))
         best = max(hypotheses, key=lambda hypothesis: hypothesis.score)
+        # Requiring two catalogue votes when the user selected one platform made
+        # the catalogue-supported path mathematically impossible. Scale the
+        # quorum to the providers actually available; the semantic matcher still
+        # has to verify that provider's returned product.
+        catalog_quorum = min(
+            settings.autonomous_catalog_min_providers,
+            max(1, len(providers)),
+        )
         catalog_supported = (
-            best.catalog_hits >= settings.autonomous_catalog_min_providers
+            best.catalog_hits >= catalog_quorum
             and best.score >= settings.autonomous_catalog_confidence
         )
         if best.score >= settings.autonomous_accept_confidence or catalog_supported:

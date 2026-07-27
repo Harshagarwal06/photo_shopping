@@ -37,3 +37,26 @@ def test_spoofed_or_unsupported_image_uploads_fail_before_ocr():
 
     assert spoofed.status_code == 422
     assert unsupported.status_code == 415
+
+
+def test_arbitrary_bytes_cannot_reach_ocr_behind_a_heic_content_type():
+    """Pillow cannot decode HEIC, so the container is checked instead of trusted."""
+    client = TestClient(app)
+
+    spoofed = client.post(
+        "/api/plans/preview",
+        files={"image": ("list.heic", b"not an image at all", "image/heic")},
+    )
+    real_shape = client.post(
+        "/api/plans/preview",
+        files={"image": (
+            "list.heic",
+            b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00heicmif1",
+            "image/heic",
+        )},
+    )
+
+    assert spoofed.status_code == 422
+    # A genuine container gets past upload validation and fails later, in OCR,
+    # rather than being rejected as unreadable bytes.
+    assert real_shape.status_code != 422

@@ -41,6 +41,7 @@ from .models import (
 from .providers import GroceryProvider, ProviderError, create_providers
 from .planner import plan_cart, retry_uncertain_with_cloud
 from .recognition import resolve_plan_autonomously
+from .search_cache import cached_search
 
 
 settings = get_settings()
@@ -117,6 +118,21 @@ def remember_draft(draft: DraftCart, constraints: CartConstraints) -> None:
         DRAFT_CONSTRAINTS.pop(expired_id, None)
 
 
+HEIF_BRANDS = {
+    b"avif", b"avis", b"heic", b"heim", b"heis", b"heix",
+    b"hevc", b"hevm", b"hevs", b"hevx", b"mif1", b"msf1",
+}
+
+
+def _is_heif_container(image_bytes: bytes) -> bool:
+    """True for an ISO base-media file whose brand is a HEIF/HEIC one."""
+    return (
+        len(image_bytes) >= 16
+        and image_bytes[4:8] == b"ftyp"
+        and image_bytes[8:12] in HEIF_BRANDS
+    )
+
+
 async def read_uploaded_image(
     image: UploadFile | None,
 ) -> tuple[bytes | None, str]:
@@ -133,15 +149,22 @@ async def read_uploaded_image(
         raise HTTPException(status_code=413, detail="The image must be smaller than 12 MB.")
     if not image_bytes:
         raise HTTPException(status_code=422, detail="The uploaded image is empty.")
-    if image_type not in {"image/heic", "image/heif"}:
+    unreadable = HTTPException(
+        status_code=422, detail="The uploaded file is not a readable image."
+    )
+    if image_type in {"image/heic", "image/heif"}:
+        # Pillow cannot decode HEIC without a plugin, so the container is
+        # checked directly: an ISO base-media "ftyp" box whose brand is one the
+        # format actually uses. Weaker than a decode, but it stops arbitrary
+        # bytes reaching the OCR subprocess behind a declared content type.
+        if not _is_heif_container(image_bytes):
+            raise unreadable
+    else:
         try:
             with Image.open(BytesIO(image_bytes)) as decoded:
                 decoded.verify()
         except (OSError, SyntaxError, UnidentifiedImageError) as exc:
-            raise HTTPException(
-                status_code=422,
-                detail="The uploaded file is not a readable image.",
-            ) from exc
+            raise unreadable from exc
     return image_bytes, image_type
 
 
@@ -376,8 +399,12 @@ async def preview_plan(
             provider_ids=selected,
             use_cloud=use_cloud,
         )
-    except Exception as exc:
+    except ModelBackendError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except ValueError as exc:
+        # A rejected plan is the caller's request being unusable, not an
+        # upstream failure. Anything else is a bug and should surface as one.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.post("/api/drafts/stream")
@@ -478,7 +505,7 @@ async def create_draft_stream(
                 # reported on its own item rather than as an empty result.
                 search_error = ""
                 try:
-                    candidates = await draft_provider.search(provider_query)
+                    candidates = await cached_search(draft_provider, provider_query, settings)
                 except ProviderError as exc:
                     candidates = []
                     search_error = str(exc) or exc.__class__.__name__
@@ -617,7 +644,9 @@ async def research_item(request: SearchRequest) -> DraftItem:
     draft_provider = get_provider(draft.provider_id or None)
     item.planned.apply_manual_query(request.query)
     try:
-        candidates = await draft_provider.search(item.planned.provider_query)
+        candidates = await cached_search(
+            draft_provider, item.planned.provider_query, settings
+        )
         decision = await asyncio.to_thread(match_product, item.planned, candidates, settings)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc

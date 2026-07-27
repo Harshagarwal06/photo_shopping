@@ -49,14 +49,19 @@ IGNORED_TOKENS = {
 }
 KNOWN_BRAND_PHRASES = {
     "aashirvaad", "amul", "britannia", "cadbury", "daawat", "fortune",
-    "kelloggs", "knorr", "kurkure", "maggi", "mother dairy", "oreo",
+    "havmor", "kelloggs", "knorr", "kurkure", "maggi", "mother dairy", "oreo",
     "pintola", "real", "rin", "tata",
 }
 MATCH_SYNONYMS = {
+    "bodywash": {"gel", "shower"},
     "dishwashing": {"dishwash"},
     "dishwash": {"dishwashing"},
+    "enamel": {"paint", "polish"},
+    "gel": {"bodywash", "liquid"},
     "liquid": {"gel"},
-    "gel": {"liquid"},
+    "paint": {"enamel", "polish"},
+    "polish": {"enamel", "paint"},
+    "shower": {"bodywash"},
 }
 MATCH_TOKEN_ALIASES = {
     "cao": "cow",
@@ -102,7 +107,7 @@ def _contains_phrase(value: str, phrase: str) -> bool:
     return re.search(rf"(?<![a-z0-9]){pattern}(?![a-z0-9])", value.casefold()) is not None
 
 
-def _match_is_reasonable(item: PlannedItem, product: Product) -> tuple[bool, str]:
+def match_is_reasonable(item: PlannedItem, product: Product) -> tuple[bool, str]:
     """Fail closed when provider search results have no credible request relation."""
     if item.needs_review and not item.confirmed:
         return False, "The transcription needs review before product matching."
@@ -151,7 +156,10 @@ def _match_is_reasonable(item: PlannedItem, product: Product) -> tuple[bool, str
     for query in query_tokens:
         best = max((_token_similarity(query, name) for name in name_tokens), default=0)
         similarities.append(best)
-        threshold = 0.65 if len(query) <= 2 else 0.72 if len(query) <= 4 else 0.78
+        # Three- and four-letter fragments collide with retail brands too
+        # easily: "Mag" scored 0.75 against "Maggi" and was accepted as if it
+        # were a complete product request. Exact aliases still score 1.0.
+        threshold = 0.65 if len(query) <= 2 else 0.80 if len(query) <= 4 else 0.78
         if best >= threshold:
             matched += 1
     required = 1 if len(query_tokens) == 1 else math.ceil(len(query_tokens) * 2 / 3)
@@ -271,7 +279,7 @@ def _fallback_match(item: PlannedItem, candidates: list[Product]) -> MatchDecisi
     available = [
         candidate
         for candidate in candidates
-        if candidate.in_stock and _match_is_reasonable(item, candidate)[0]
+        if candidate.in_stock and match_is_reasonable(item, candidate)[0]
     ]
     if not available:
         return MatchDecision(
@@ -359,7 +367,7 @@ def match_product(
     if decision.product_id not in valid_ids:
         raise ModelBackendError("The matcher selected an unavailable or unknown product.")
     selected = next(candidate for candidate in candidates if candidate.id == decision.product_id)
-    reasonable, reason = _match_is_reasonable(item, selected)
+    reasonable, reason = match_is_reasonable(item, selected)
     if not reasonable:
         return MatchDecision(
             product_id=None,
@@ -523,7 +531,7 @@ def _supply_within_band(
         return None
     best: tuple[tuple[float, float, int], Product, int] | None = None
     for position, candidate in enumerate(candidates):
-        if not candidate.in_stock or not _match_is_reasonable(item, candidate)[0]:
+        if not candidate.in_stock or not match_is_reasonable(item, candidate)[0]:
             continue
         packed = parse_measurement(candidate.pack_size or candidate.name)
         if not packed or packed[1] != dimension or packed[0] <= 0:
@@ -550,7 +558,7 @@ def _comparable_references(
     seen: dict[tuple[float, str], None] = {}
     for candidates in candidates_by_provider.values():
         for candidate in candidates:
-            if not candidate.in_stock or not _match_is_reasonable(item, candidate)[0]:
+            if not candidate.in_stock or not match_is_reasonable(item, candidate)[0]:
                 continue
             packed = parse_measurement(candidate.pack_size or candidate.name)
             if packed and packed[0] > 0:

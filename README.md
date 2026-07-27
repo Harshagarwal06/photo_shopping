@@ -111,6 +111,12 @@ the policy back to `review` to restore the manual checkpoint.
 The app is currently configured for port `8000`; the OAuth redirect URI must use the
 same port and `localhost` host.
 
+The app answers only on a loopback address. A request whose `Host` is anything other
+than `localhost`, `127.0.0.1`, or `::1` is refused, and a browser write from another
+origin is refused separately. This blocks DNS rebinding, and it also means the app
+cannot be reached from another device on the same network — opening it from a phone at
+`http://192.168.x.x:8000` returns 400 by design.
+
 ## Compare apps
 
 Choose the platforms under **Compare across apps**, then select **Compare estimated
