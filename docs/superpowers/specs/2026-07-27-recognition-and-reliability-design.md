@@ -23,8 +23,8 @@ measurement problem rather than a bug:
 - **The comparison compares different products.** Found later, from a real
   four-item run: the cross-platform matcher short-circuits on the configured
   backend, so each platform is matched in isolation and the resulting baskets
-  differ in brand and pack size. This defeats the app's central claim rather
-  than degrading it, and is treated as a first-class section below.
+  deliver different amounts. This defeats the app's central claim rather than
+  degrading it, and is treated as a first-class section below.
 
 Measured evidence that shaped the design: a single cloud call on the **whole**
 photo returned 7 of 8 lines correctly in about 4 seconds with no memorised
@@ -187,8 +187,8 @@ backend. Actual dish expansion through the cloud path is out of scope here.
 ## Comparison equivalence
 
 "Which app is cheapest for my list" is the product. It is currently wrong
-whenever the compared baskets differ in pack size, which — for a list without
-written quantities — is most of the time.
+whenever the compared baskets deliver different amounts, which — for a list
+without written quantities — is most of the time.
 
 ### The short circuit
 
@@ -240,57 +240,74 @@ on smaller packs.
 
 ### Design
 
-**Anchor-based cross-matching, with no hosted model required.** The fix belongs in
+> Corrected after implementation. This section first specified matching on the
+> **same brand and pack size**. That is wrong, and the existing test
+> `test_units_scale_to_the_pack_size_each_platform_stocks` says so: one 1 L pack
+> and two 500 ml packs are perfectly comparable. Building what was written here
+> would have broken a correct test. The invariant is **delivered quantity** —
+> pack size × units — not pack size, and brand is a tiebreak rather than a
+> requirement.
+
+**A shared reference amount, with no hosted model required.** The fix belongs in
 the fallback, since that is the path that actually runs.
 
-1. Score each platform's candidates as today, per platform.
-2. Choose an **anchor**: the candidate the matcher is most confident about across
-   all platforms. Selection uses the request-relevance and quantity-fit terms
-   only, **not** the composite score. `_score_candidate` normalises its price term
-   against `lowest_total` within one platform's own candidate list, so composite
-   scores are not comparable between platforms and picking on them would make the
-   anchor a function of each platform's internal price spread.
-3. Extract the anchor's brand (the existing `KNOWN_BRAND_PHRASES` /
-   `_brand_from_name` machinery) and its normalised pack measurement
-   (`parse_measurement`).
-4. Re-score every platform with two added terms: brand agreement with the anchor,
-   and pack-size agreement within the existing `min_fill_ratio` /
-   `max_fill_ratio` band.
-5. Where a platform has **no candidate inside the band, report no equivalent** —
-   `product_id: null` — instead of forcing a pick.
+1. **Establish the reference amount.**
+   - If the request states a quantity, that is the reference. `unit` defaults to
+     `"item"`, and `requested_measurement` reports `(1, "count")` for a line that
+     stated nothing, so the default must be treated as *unstated* — otherwise a
+     250 g pack and a 500 g pack both appear to satisfy "1 item".
+   - Otherwise the catalogue supplies it: of every amount some platform stocks,
+     choose the one **the most platforms can actually supply**. Maximising
+     coverage is what makes a comparison worth showing; ties break on request
+     relevance, then on lower total price.
+2. **Hold every platform to it.** For each platform, take the candidate whose
+   pack × units lands inside the existing `min_fill_ratio` / `max_fill_ratio`
+   band around the reference. Units scale to reach it: two 250 g packs are a
+   legitimate way to supply 500 g.
+3. **Refuse rather than mislead.** A platform with nothing inside the band
+   reports `product_id: null`. Today the fallback always returns something, which
+   is how a jar gets compared to a packet.
 
-Step 5 is the substantive change. Today the fallback always returns something,
-which is how a jar gets compared to a packet. It also converges the two backends'
-behaviour: refusing a poor match is already what the hosted prompt instructs.
+Candidate ranking within a platform still uses request relevance, **not** the
+composite `_score_candidate` value: that normalises its price term against
+`lowest_total` within one platform's own candidate list, so composite scores are
+not comparable between platforms.
 
-The band check applies to hosted picks too, not only to the fallback. A hosted
-model can return divergent pack sizes while obeying its own id validation, and
-the existing verification loop checks only that ids are real and in stock. Pack
-and brand equivalence become part of that same trust boundary.
+Unmeasurable packs — pieces, loose items, unparseable sizes — fall back to
+independent matching. Refusing everything that cannot be measured would reject a
+large part of a normal grocery list.
+
+The same check applies to hosted picks. A model can name real, in-stock,
+correctly-branded products that deliver different amounts, which is the identical
+misleading comparison arriving by a route that looks trustworthy. Delivered
+amount joins ids on that trust boundary; a hosted result whose picks disagree on
+amount falls back to the deterministic path.
 
 **Ranking needs no new axis.** A platform with no equivalent reports the line as
 missing, which drops it a `coverage_tier`, and the existing lexicographic ranking
 handles it. This composes with the `matched_items > 0` requirement added in Batch
 B: a platform with no comparable products cannot win on an empty cart.
-`per_unit_price` is used to *detect* pack divergence in step 4 and to disclose it,
-not as a competing sort key.
 
-**Disclosure in the interface.** Each comparison row states what is being
-compared — the anchor's brand and pack size — and each platform shows either its
-equivalent or an explicit "no comparable product". Pack size moves out of
-truncated dropdown text, where the 250 g / 500 g difference was invisible, into
-the row itself.
+**Disclosure in the interface.** Each comparison row states the amount being
+compared and, per platform, the units and pack that supply it — `2 × 250 g` reads
+differently from `1 × 500 g` and the user should see which they are buying. A
+platform with no equivalent shows that explicitly instead of being absent. Pack
+size moves out of truncated dropdown text, where the 250 g / 500 g difference was
+invisible, into the row itself.
 
 ### Verification
 
-Comparability is a ranking property, so it belongs with the ranking corpus
-(`tools/ranking_corpus.py`) rather than the recognition harness. Two checks:
+Covered by `tests/test_cross_platform_matcher.py`, driven by the live failure:
 
-- Recorded multi-platform candidate sets where the correct answer is known,
-  asserting the anchor's brand and pack size are held across platforms.
-- A regression on the case above: given those rajma candidates, either the packs
-  match or the mismatched platform reports no equivalent. Never 250 g against
-  500 g compared on face value.
+- Platforms converge on one delivered amount when an equivalent exists.
+- The reported case — 250 g at ₹48 against 500 g at ₹93 — buys two 250 g packs
+  for ₹96 against ₹93, so the platform that is cheaper per gram wins.
+- A stated quantity overrides the catalogue, even when a larger pack is better
+  value.
+- A platform that cannot reach the stated amount by any multiple (500 g wanted,
+  only a 2 kg sack stocked) reports no equivalent.
+- Unmeasurable packs still match independently.
+- Hosted picks that disagree on delivered amount are rejected.
 
 ## Provider resilience
 
