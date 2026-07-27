@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Photo Shopping</title>
     <meta name="description" content="Turn a grocery photo or typed request into a ranked instant-grocery cart." />
-    <link rel="stylesheet" href="/styles.css" />
-    <script src="/app.js?v=comparison-1" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=project-audit-2" />
+    <script src="/app.js?v=autonomous-recognition-1" defer></script>
   </head>
   <body>
     <header class="nav-slab">
@@ -52,7 +52,7 @@
           </p>
           <ul class="promise-list" aria-label="What the assistant handles">
             <li>English, Hindi, and Hinglish</li>
-            <li>Dish-to-ingredient expansion</li>
+            <li id="dish-capability">Dish-to-ingredient expansion with hosted planning</li>
             <li>Budget and pack-size checks</li>
           </ul>
         </div>
@@ -107,6 +107,34 @@
             </div>
           </div>
         </form>
+      </section>
+
+      <section class="transcription-shell" id="transcription" aria-labelledby="transcription-title" hidden>
+        <header class="transcription-head">
+          <div>
+            <span class="comparison-kicker">Before provider search</span>
+            <h2 id="transcription-title">Review the transcription.</h2>
+            <p id="transcription-summary">
+              Correct names, brands, and quantities here. Nothing below has been sent to a grocery provider yet.
+            </p>
+          </div>
+          <div class="confidence-key" aria-label="Transcription confidence legend">
+            <span><i class="confidence-dot is-ready"></i> Ready</span>
+            <span><i class="confidence-dot is-review"></i> Needs review</span>
+          </div>
+        </header>
+        <div class="transcription-notice" id="transcription-notice" role="status"></div>
+        <div class="transcription-items" id="transcription-items"></div>
+        <div class="transcription-actions">
+          <button class="btn btn--soft" id="cloud-retry" type="button" hidden>
+            <span class="button-label">Retry uncertain lines with cloud vision</span>
+            <span class="spinner" aria-hidden="true"></span>
+          </button>
+          <button class="btn btn--primary" id="continue-reviewed" type="button">
+            <span class="button-label">Search the reviewed list</span>
+            <span class="spinner" aria-hidden="true"></span>
+          </button>
+        </div>
       </section>
 
       <section class="progress-band" id="progress" aria-labelledby="progress-title" hidden>

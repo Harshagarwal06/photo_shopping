@@ -38,10 +38,19 @@ async def _search_platform(
     """Search every planned item on one platform. Items stay sequential."""
     results = {}
     for index, item in enumerate(plan.items, start=1):
+        if item.needs_review and not item.confirmed:
+            results[item.id] = []
+            _emit(
+                on_event,
+                "retrieval",
+                f"Skipped uncertain transcription {item.search_term}; review is required.",
+                provider.provider_id,
+            )
+            continue
         _emit(on_event, "retrieval",
-              f"Searching {provider.display_name} for {item.search_term} "
+              f"Searching {provider.display_name} for {item.provider_query} "
               f"({index}/{len(plan.items)})…", provider.provider_id)
-        results[item.id] = await provider.search(item.search_term)
+        results[item.id] = await provider.search(item.provider_query)
     return results
 
 

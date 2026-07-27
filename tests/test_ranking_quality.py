@@ -25,9 +25,9 @@ CORPUS = json.loads(
     )
 )
 CASES = CORPUS["cases"]
-# 15 of 19 before the provider's result order was scored, 17 after. Raise this
-# when a change earns it; a drop means a change cost more than it gained.
-MINIMUM_CORRECT = 17
+# The order-sensitive masala-chai rule closes the final known miss. Any drop now
+# means a ranking change regressed a captured real provider result.
+MINIMUM_CORRECT = len(CASES)
 
 
 def chosen_product(case: dict) -> str:
@@ -61,6 +61,7 @@ def test_the_matcher_still_finds_what_the_lists_asked_for():
         # scored, and both are the kind of miss a user notices immediately.
         ("Thumbs u", "thums up"),
         ("Modern nhite bread", "modern white"),
+        ("masala chai", "masala chai"),
     ],
 )
 def test_named_regressions_stay_fixed(query, expected):

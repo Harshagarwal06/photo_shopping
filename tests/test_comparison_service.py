@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from app.comparison_service import ComparisonService
+from app.comparison_service import ComparisonService, _Confirmation
 from app.config import Settings
 from app.models import (
     AddResult,
@@ -208,3 +208,25 @@ def test_override_recalculates_proposal_and_invalidates_confirmation():
     assert updated.frozen is False
     with pytest.raises(ValueError):
         asyncio.run(service.verify(proposal.id, preflight.confirmation_token))
+
+
+def test_in_memory_state_is_bounded_and_expired_confirmations_are_purged():
+    service = ComparisonService({}, Settings(max_state_records=10))
+    for index in range(12):
+        service._remember(service.proposals, str(index), object())
+
+    assert list(service.proposals) == [str(index) for index in range(2, 12)]
+
+    service._confirmations["expired"] = _Confirmation(
+        proposal_id="old",
+        provider_ids=(),
+        expires_at=0,
+    )
+    service._confirmations["current"] = _Confirmation(
+        proposal_id="new",
+        provider_ids=(),
+        expires_at=float("inf"),
+    )
+    service._purge_expired_confirmations()
+
+    assert list(service._confirmations) == ["current"]

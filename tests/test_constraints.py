@@ -18,6 +18,13 @@ def test_measurement_normalises_metric_units():
     assert parse_measurement("Tray 12 pcs") == (12, "count")
 
 
+def test_measurement_counts_multipacks_and_same_dimension_bonus_amounts():
+    assert parse_measurement("6 x 200 ml") == (1200, "ml")
+    assert parse_measurement("200 ml × 6") == (1200, "ml")
+    assert parse_measurement("4 x 250 g") == (1000, "g")
+    assert parse_measurement("1 kg + 200 g free") == (1200, "g")
+
+
 def test_purchasable_units_do_not_turn_eggs_into_trays():
     item = PlannedItem(search_term="eggs", quantity=12, unit="count")
     tray = product("eggs-12", "Fresh eggs", "12 pcs", 120)
@@ -47,6 +54,27 @@ def test_item_cap_swaps_to_candidate_that_fits():
     assert draft.items[0].selected_product_id == affordable.id
     assert draft.total == 180
     assert any("item cap" in flag for flag in draft.items[0].flags)
+
+
+def test_item_cap_never_swaps_to_an_unrelated_cheaper_search_result():
+    item = PlannedItem(search_term="milk", quantity=1, unit="pack")
+    milk = product("milk", "Toned Milk", "1 L", 100)
+    soap = product("soap", "Bathing Soap", "100 g", 20)
+    draft_item = DraftItem(
+        planned=item,
+        candidates=[milk, soap],
+        selected_product_id=milk.id,
+        units_to_add=1,
+    )
+
+    draft = enforce_constraints(
+        [draft_item],
+        CartConstraints(item_caps={"milk": 50}),
+        dry_run=True,
+    )
+
+    assert draft.items[0].selected_product_id == milk.id
+    assert any("No candidate fits" in flag for flag in draft.items[0].flags)
 
 
 def test_budget_violation_is_flagged_not_silently_removed():
@@ -85,4 +113,3 @@ def test_runaway_quantity_is_capped_and_flagged():
     draft = enforce_constraints([draft_item], CartConstraints(), dry_run=True)
     assert draft.items[0].units_to_add == 50
     assert any("capped" in flag for flag in draft.items[0].flags)
-

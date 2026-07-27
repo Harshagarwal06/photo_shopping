@@ -102,6 +102,16 @@ def _product(product_id: str, name: str, price: float) -> Product:
     return Product(id=product_id, name=name, price=price, handle=product_id)
 
 
+def test_cheapest_preference_can_outweigh_provider_position():
+    item = PlannedItem(search_term="milk", context="prefer lowest total price")
+    candidates = [
+        _product("premium", "Toned Milk", 100),
+        _product("value", "Toned Milk Value Pack", 55),
+    ]
+
+    assert _fallback_match(item, candidates).product_id == "value"
+
+
 def test_the_providers_top_result_wins_a_tie_price_would_otherwise_take():
     """A photographed "nhite" matches neither bread, so relevance ties and the
     cheaper loaf used to win. Blinkit ranked the right one first."""
@@ -120,9 +130,8 @@ def test_the_providers_top_result_wins_a_tie_price_would_otherwise_take():
     assert decision.product_id == "white"
 
 
-def test_the_providers_order_decides_when_nothing_in_the_query_matches():
-    """"Thumbs u" matches no product name at all, so every candidate scored zero
-    relevance and a ₹2 difference chose Coca-Cola over Thums Up."""
+def test_provider_order_can_resolve_a_close_typo_but_not_an_unrelated_result():
+    """Provider order is useful only after the request and product are plausibly related."""
     item = PlannedItem(search_term="Thumbs u", quantity=1, unit="item")
     candidates = [
         _product("thums", "Thums Up Soft Drink", 40),
@@ -133,6 +142,81 @@ def test_the_providers_order_decides_when_nothing_in_the_query_matches():
     decision = _fallback_match(item, candidates)
 
     assert decision.product_id == "thums"
+
+    unrelated = _fallback_match(
+        PlannedItem(search_term="Bicad"),
+        [_product("coffee", "Bevzilla Classic Instant Coffee Powder Sachets", 99)],
+    )
+    assert unrelated.product_id is None
+    assert "No confident" in unrelated.reason
+
+
+def test_brand_and_product_modifier_must_survive_matching():
+    branded = PlannedItem(search_term="mixed fruit juice", context="Real")
+    brand_decision = _fallback_match(
+        branded,
+        [
+            _product("rasna", "Rasna Jumpin Mixed Fruit Juice", 71),
+            _product("real", "Real Mixed Fruit Juice", 110),
+        ],
+    )
+    assert brand_decision.product_id == "real"
+
+    cut = PlannedItem(search_term="chicken breast")
+    cut_decision = _fallback_match(
+        cut,
+        [
+            _product("curry", "Chicken Curry Cut", 120),
+            _product("breast", "Chicken Breast Boneless", 180),
+        ],
+    )
+    assert cut_decision.product_id == "breast"
+
+
+def test_dietary_and_cut_modifiers_cannot_be_discarded_by_partial_overlap():
+    sugar_free = PlannedItem(search_term="sugar free biscuits")
+    assert _fallback_match(
+        sugar_free,
+        [_product("regular", "Sugar Biscuits", 20)],
+    ).product_id is None
+    assert _fallback_match(
+        sugar_free,
+        [_product("free", "Sugar Free Biscuits", 30)],
+    ).product_id == "free"
+
+    boneless = PlannedItem(search_term="boneless chicken breast")
+    assert _fallback_match(
+        boneless,
+        [_product("bone-in", "Chicken Breast", 100)],
+    ).product_id is None
+    assert _fallback_match(
+        boneless,
+        [_product("boneless", "Boneless Chicken Breast", 150)],
+    ).product_id == "boneless"
+
+
+def test_rin_soap_matches_its_detergent_bar_without_weakening_generic_soap():
+    rin = PlannedItem(search_term="soap", context="Rin")
+    candidates = [
+        _product("pears", "Pears Pure & Gentle Glycerin Soap", 50),
+        _product("rin", "Rin Detergent Bar", 10),
+        _product("surf", "Surf Excel Stain Eraser Detergent Bar", 10),
+    ]
+
+    assert rin.provider_query == "Rin soap"
+    assert _fallback_match(rin, candidates).product_id == "rin"
+    # The equivalence is intentionally brand-scoped: an unbranded bathing-soap
+    # request must not silently become laundry detergent.
+    assert _fallback_match(PlannedItem(search_term="soap"), candidates).product_id == "pears"
+
+
+def test_uncertain_transcription_is_never_matched_until_confirmed():
+    item = PlannedItem(search_term="Ma", needs_review=True)
+    candidates = [_product("maggi", "Maggi Instant Noodles", 20)]
+
+    assert _fallback_match(item, candidates).product_id is None
+    item.confirmed = True
+    assert _fallback_match(item, candidates).product_id is None
 
 
 def test_position_does_not_override_a_genuinely_better_match():

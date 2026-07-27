@@ -7,11 +7,17 @@ const state = {
   provider: "blinkit",
   providerName: "grocery provider",
   providerConnected: false,
+  providerReady: false,
   cartMutationsAllowed: false,
   availableProviders: [],
   lastTotal: 0,
   comparisonProposal: null,
   comparisonOperation: null,
+  plan: null,
+  pendingAction: "draft",
+  cloudRetryAvailable: false,
+  cloudRetryProvider: "cloud",
+  recognitionPolicy: "review",
 };
 
 const ui = {
@@ -32,9 +38,16 @@ const ui = {
   addressEmpty: document.querySelector("#address-empty"),
   refreshAddresses: document.querySelector("#refresh-addresses"),
   modeBadge: document.querySelector("#mode-badge"),
+  dishCapability: document.querySelector("#dish-capability"),
   progress: document.querySelector("#progress"),
   progressMessage: document.querySelector("#progress-message"),
   stages: [...document.querySelectorAll("#stage-list li")],
+  transcription: document.querySelector("#transcription"),
+  transcriptionItems: document.querySelector("#transcription-items"),
+  transcriptionNotice: document.querySelector("#transcription-notice"),
+  transcriptionSummary: document.querySelector("#transcription-summary"),
+  cloudRetry: document.querySelector("#cloud-retry"),
+  continueReviewed: document.querySelector("#continue-reviewed"),
   review: document.querySelector("#review"),
   groups: document.querySelector("#review-groups"),
   cartFlags: document.querySelector("#cart-flags"),
@@ -219,6 +232,7 @@ function candidateMarkup(item, product) {
 
 function itemMarkup(item) {
   const selected = selectedProduct(item);
+  const providerQuery = item.planned.provider_query || item.planned.search_term;
   const candidates = selected
     ? `<div class="candidate-grid is-single">${candidateMarkup(item, selected)}</div>`
     : `<div class="empty-results"><h3>No ${escapeHtml(state.providerName)} results</h3><p>Change the search phrase above and try again.</p></div>`;
@@ -228,8 +242,8 @@ function itemMarkup(item) {
   const tools = state.autoAdd
     ? '<span class="selection-status">Automatically selected</span>'
     : `<form class="query-editor" data-action="research">
-        <label for="query-${escapeHtml(item.planned.id)}">Search query for ${escapeHtml(item.planned.search_term)}</label>
-        <input class="query-input" id="query-${escapeHtml(item.planned.id)}" value="${escapeHtml(item.planned.search_term)}" />
+        <label for="query-${escapeHtml(item.planned.id)}">Search query for ${escapeHtml(providerQuery)}</label>
+        <input class="query-input" id="query-${escapeHtml(item.planned.id)}" value="${escapeHtml(providerQuery)}" />
         <button class="text-button" type="submit">Search</button>
       </form>
       <button class="text-button" type="button" data-action="remove">${item.removed ? "Restore" : "Remove"}</button>`;
@@ -298,6 +312,172 @@ function renderDraft() {
 function selectedComparisonProviders() {
   return [...ui.comparisonProviders.querySelectorAll('input[type="checkbox"]:checked')]
     .map((input) => input.value);
+}
+
+const transcriptionUnits = ["item", "count", "g", "kg", "ml", "l", "pack"];
+
+function transcriptionRowMarkup(item) {
+  const warning = item.needs_review;
+  const notes = (item.recognition_notes ?? []).join(" ");
+  const alternatives = (item.alternatives ?? []).slice(0, 4);
+  return `
+    <article class="transcription-row${warning ? " is-review" : ""}" data-plan-item="${escapeHtml(item.id)}">
+      <label class="transcription-include">
+        <input type="checkbox" data-field="include" ${warning && !item.confirmed ? "" : "checked"} />
+        <span>Include</span>
+      </label>
+      <div class="transcription-field">
+        <label for="plan-name-${escapeHtml(item.id)}">Product</label>
+        <input id="plan-name-${escapeHtml(item.id)}" data-field="search_term" value="${escapeHtml(item.search_term)}" />
+      </div>
+      <div class="transcription-field">
+        <label for="plan-context-${escapeHtml(item.id)}">Brand or note</label>
+        <input id="plan-context-${escapeHtml(item.id)}" data-field="context" value="${escapeHtml(item.context)}" />
+      </div>
+      <div class="transcription-field">
+        <label for="plan-quantity-${escapeHtml(item.id)}">Quantity</label>
+        <input id="plan-quantity-${escapeHtml(item.id)}" data-field="quantity" type="number" min="0.01" step="any" value="${escapeHtml(item.quantity)}" />
+      </div>
+      <div class="transcription-field">
+        <label for="plan-unit-${escapeHtml(item.id)}">Unit</label>
+        <select id="plan-unit-${escapeHtml(item.id)}" data-field="unit">
+          ${transcriptionUnits.map((unit) => `<option value="${unit}" ${unit === item.unit ? "selected" : ""}>${unit}</option>`).join("")}
+        </select>
+      </div>
+      ${item.crop_box?.length === 4 ? `<canvas class="transcription-crop" data-crop="${item.crop_box.map(Number).join(",")}" aria-label="Handwriting crop for ${escapeHtml(item.search_term)}"></canvas>` : ""}
+      <p class="transcription-source">Read from “${escapeHtml(item.raw_text || item.search_term)}” · semantic confidence ${Math.round((item.confidence ?? 0) * 100)}%</p>
+      ${alternatives.length ? `<p class="transcription-alternatives">Other readings: ${alternatives.map((alternative) => `<span>“${escapeHtml(alternative)}”</span>`).join(" · ")}</p>` : ""}
+      ${warning ? `<p class="transcription-warning">${escapeHtml(notes || "This line needs confirmation before search.")}</p>` : ""}
+    </article>`;
+}
+
+async function renderTranscriptionCrops() {
+  const file = ui.image.files[0];
+  if (!file || !window.createImageBitmap) return;
+  const bitmap = await createImageBitmap(file);
+  for (const canvas of ui.transcriptionItems.querySelectorAll("[data-crop]")) {
+    const [x, y, width, height] = canvas.dataset.crop.split(",").map(Number);
+    const xPad = Math.max(0.02, width * 0.06);
+    const yPad = Math.max(0.012, height * 0.3);
+    const sx = Math.max(0, (x - xPad) * bitmap.width);
+    const sy = Math.max(0, (1 - (y + height / 2 + yPad)) * bitmap.height);
+    const sw = Math.min(bitmap.width - sx, (width + xPad * 2) * bitmap.width);
+    const sh = Math.min(bitmap.height - sy, (height + yPad * 2) * bitmap.height);
+    canvas.width = 720;
+    canvas.height = Math.max(80, Math.round(720 * sh / Math.max(1, sw)));
+    canvas.getContext("2d").drawImage(
+      bitmap, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height,
+    );
+  }
+  bitmap.close();
+}
+
+function renderTranscription() {
+  if (!state.plan) return;
+  const uncertain = state.plan.items.filter((item) => item.needs_review).length;
+  ui.transcriptionItems.innerHTML = state.plan.items.map(transcriptionRowMarkup).join("");
+  renderTranscriptionCrops().catch(() => {
+    // The editable transcription remains usable if a browser cannot render crops.
+  });
+  ui.transcriptionNotice.textContent = state.plan.processing_note || "";
+  ui.transcriptionSummary.textContent = uncertain
+    ? `${state.plan.items.length} lines found; ${uncertain} need confirmation. Unchecked lines will not be searched.`
+    : `${state.plan.items.length} lines found. Check the transcription before provider search.`;
+  ui.cloudRetry.hidden = !(
+    uncertain
+    && state.cloudRetryAvailable
+    && ui.image.files[0]
+  );
+  ui.continueReviewed.querySelector(".button-label").textContent =
+    state.pendingAction === "compare" ? "Compare the reviewed list" : "Search the reviewed list";
+  ui.transcription.hidden = false;
+  ui.progress.hidden = true;
+  ui.transcription.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function reviewedPlanFromForm() {
+  if (!state.plan) return null;
+  const items = [];
+  for (const row of ui.transcriptionItems.querySelectorAll("[data-plan-item]")) {
+    const original = state.plan.items.find((item) => item.id === row.dataset.planItem);
+    if (!original || !row.querySelector('[data-field="include"]').checked) continue;
+    const searchTerm = row.querySelector('[data-field="search_term"]').value.trim();
+    const quantity = Number(row.querySelector('[data-field="quantity"]').value);
+    if (!searchTerm || !Number.isFinite(quantity) || quantity <= 0) {
+      throw new Error("Every included line needs a product name and positive quantity.");
+    }
+    items.push({
+      ...original,
+      search_term: searchTerm,
+      context: row.querySelector('[data-field="context"]').value.trim(),
+      quantity,
+      unit: row.querySelector('[data-field="unit"]').value,
+      needs_review: false,
+      confirmed: true,
+    });
+  }
+  if (!items.length) throw new Error("Include at least one reviewed grocery item.");
+  return { ...state.plan, items };
+}
+
+async function previewRequest(action, { useCloud = false } = {}) {
+  const hasText = Boolean(ui.text.value.trim());
+  const hasImage = Boolean(ui.image.files[0]);
+  if (!hasText && !hasImage) {
+    showRequestError("Add a photo or type the grocery list first.");
+    ui.text.focus();
+    return;
+  }
+  state.pendingAction = action;
+  const button = useCloud
+    ? ui.cloudRetry
+    : action === "compare" ? ui.compareButton : ui.draftButton;
+  showRequestError("");
+  setButtonState(button, "loading");
+  ui.progress.hidden = false;
+  ui.review.hidden = true;
+  ui.comparison.hidden = true;
+  ui.confirmBar.hidden = true;
+  ui.progressMessage.textContent = useCloud
+    ? "Retrying only uncertain line crops with cloud vision…"
+    : "Reading and structuring the request locally…";
+  setStage("planner");
+  const formData = new FormData();
+  formData.append("text", ui.text.value);
+  formData.append("use_cloud", useCloud ? "true" : "false");
+  formData.append(
+    "provider_ids",
+    (
+      action === "compare"
+        ? selectedComparisonProviders()
+        : [state.provider]
+    ).join(","),
+  );
+  if (hasImage) formData.append("image", ui.image.files[0]);
+  try {
+    const response = await fetch("/api/plans/preview", { method: "POST", body: formData });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || "Transcription failed.");
+    state.plan = payload;
+    if (state.recognitionPolicy === "autonomous_safe" && !useCloud) {
+      if (action === "draft" && !state.providerReady && !state.demoMode) {
+        throw new Error(`Connect ${state.providerName} before searching the list.`);
+      }
+      const succeeded = action === "compare"
+        ? await runComparison(payload)
+        : await streamDraft(payload);
+      if (!succeeded) return;
+      return;
+    }
+    renderTranscription();
+    setButtonState(button, "success");
+    window.setTimeout(() => setButtonState(button), 1200);
+  } catch (error) {
+    setButtonState(button, "error");
+    ui.progressMessage.textContent = error.message;
+    showToast(error.message, { tone: "error", sticky: true });
+    window.setTimeout(() => setButtonState(button), 1800);
+  }
 }
 
 function comparisonOutcomeMarkup(outcome, winner) {
@@ -435,15 +615,8 @@ async function overrideComparisonSelection(providerId, itemId, productId, units)
   }
 }
 
-async function compareEstimated() {
-  const hasText = Boolean(ui.text.value.trim());
-  const hasImage = Boolean(ui.image.files[0]);
+async function runComparison(plan) {
   const providerIds = selectedComparisonProviders();
-  if (!hasText && !hasImage) {
-    showRequestError("Add a photo or type the grocery list before comparing apps.");
-    ui.text.focus();
-    return;
-  }
   if (!providerIds.length) {
     showToast("Choose at least one app to compare.", { tone: "error" });
     return;
@@ -459,9 +632,8 @@ async function compareEstimated() {
   setStage("planner");
 
   const formData = new FormData();
-  formData.append("text", ui.text.value);
+  formData.append("plan_json", JSON.stringify(plan));
   formData.append("provider_ids", providerIds.join(","));
-  if (hasImage) formData.append("image", ui.image.files[0]);
 
   try {
     const response = await fetch("/api/comparisons/estimate", {
@@ -477,11 +649,13 @@ async function compareEstimated() {
     renderComparison(payload.report);
     setButtonState(ui.compareButton, "success");
     window.setTimeout(() => setButtonState(ui.compareButton), 1200);
+    return true;
   } catch (error) {
     setButtonState(ui.compareButton, "error");
     ui.progressMessage.textContent = error.message;
     showToast(error.message, { tone: "error", sticky: true });
     window.setTimeout(() => setButtonState(ui.compareButton), 1800);
+    return false;
   }
 }
 
@@ -662,19 +836,12 @@ async function confirmDraft() {
   }
 }
 
-async function buildDraft(event) {
-  event.preventDefault();
+async function streamDraft(plan) {
   ui.toastStack.replaceChildren();
-  const hasText = Boolean(ui.text.value.trim());
-  const hasImage = Boolean(ui.image.files[0]);
-  if (!hasText && !hasImage) {
-    showRequestError("No request was provided. Add a photo or type the grocery list, then build the draft.");
-    ui.text.focus();
-    return;
-  }
   showRequestError("");
   setButtonState(ui.draftButton, "loading");
   ui.progress.hidden = false;
+  ui.transcription.hidden = true;
   ui.review.hidden = true;
   ui.confirmBar.hidden = true;
   ui.progressMessage.textContent = "Starting the planner…";
@@ -682,9 +849,8 @@ async function buildDraft(event) {
   ui.progress.scrollIntoView({ behavior: "smooth", block: "center" });
 
   const formData = new FormData();
-  formData.append("text", ui.text.value);
   formData.append("provider_id", state.provider);
-  if (hasImage) formData.append("image", ui.image.files[0]);
+  formData.append("plan_json", JSON.stringify(plan));
 
   try {
     const response = await fetch("/api/drafts/stream", { method: "POST", body: formData });
@@ -719,11 +885,42 @@ async function buildDraft(event) {
     ui.review.scrollIntoView({ behavior: "smooth", block: "start" });
     setButtonState(ui.draftButton, "success");
     window.setTimeout(() => setButtonState(ui.draftButton), 1200);
+    return true;
   } catch (error) {
     setButtonState(ui.draftButton, "error");
     ui.progressMessage.textContent = error.message;
     showToast(error.message, { tone: "error", sticky: true });
     window.setTimeout(() => setButtonState(ui.draftButton), 1800);
+    return false;
+  }
+}
+
+async function buildDraft(event) {
+  event.preventDefault();
+  await previewRequest("draft");
+}
+
+async function continueReviewedPlan() {
+  try {
+    const plan = reviewedPlanFromForm();
+    if (state.pendingAction === "draft" && !state.providerReady && !state.demoMode) {
+      throw new Error(`Connect ${state.providerName} before searching the reviewed list.`);
+    }
+    setButtonState(ui.continueReviewed, "loading");
+    const succeeded = state.pendingAction === "compare"
+      ? await runComparison(plan)
+      : await streamDraft(plan);
+    if (!succeeded) {
+      setButtonState(ui.continueReviewed, "error");
+      window.setTimeout(() => setButtonState(ui.continueReviewed), 1800);
+      return;
+    }
+    setButtonState(ui.continueReviewed, "success");
+    window.setTimeout(() => setButtonState(ui.continueReviewed), 1200);
+  } catch (error) {
+    setButtonState(ui.continueReviewed, "error");
+    showToast(error.message, { tone: "error", sticky: true });
+    window.setTimeout(() => setButtonState(ui.continueReviewed), 1800);
   }
 }
 
@@ -732,10 +929,22 @@ ui.image.addEventListener("change", () => {
   ui.fileName.textContent = file ? file.name : "No photo selected";
   ui.uploadBox.classList.toggle("is-success", Boolean(file));
   ui.uploadBox.classList.remove("is-error");
+  state.plan = null;
+  ui.transcription.hidden = true;
 });
 
 ui.form.addEventListener("submit", buildDraft);
-ui.compareButton.addEventListener("click", compareEstimated);
+ui.compareButton.addEventListener("click", () => previewRequest("compare"));
+ui.cloudRetry.addEventListener("click", () =>
+  previewRequest(state.pendingAction, { useCloud: true })
+);
+ui.continueReviewed.addEventListener("click", continueReviewedPlan);
+ui.transcriptionItems.addEventListener("input", (event) => {
+  const row = event.target.closest("[data-plan-item]");
+  if (!row || event.target.matches('[data-field="include"]')) return;
+  row.querySelector('[data-field="include"]').checked = true;
+  row.classList.remove("is-review");
+});
 ui.verifyComparison.addEventListener("click", verifyComparisonReadiness);
 ui.comparisonDecision.addEventListener("click", (event) => {
   const button = event.target.closest("[data-comparison-action]");
@@ -838,6 +1047,7 @@ function clearDraftForProviderChange() {
   state.lastTotal = 0;
   ui.progress.hidden = true;
   ui.review.hidden = true;
+  ui.transcription.hidden = true;
   ui.confirmBar.hidden = true;
   ui.groups.replaceChildren();
   ui.cartFlags.replaceChildren();
@@ -930,6 +1140,16 @@ function applyHealth(health) {
   state.provider = health.grocery_provider;
   state.providerName = health.provider_name;
   state.availableProviders = health.providers ?? [];
+  state.cloudRetryAvailable = Boolean(health.cloud_retry_available);
+  state.cloudRetryProvider = health.cloud_retry_provider || "cloud";
+  state.recognitionPolicy = health.recognition_policy || "review";
+  ui.cloudRetry.querySelector(".button-label").textContent =
+    `Retry uncertain lines with ${state.cloudRetryProvider === "nvidia" ? "NVIDIA" : "cloud"} vision`;
+  ui.dishCapability.textContent = health.model_backend === "local"
+    ? state.recognitionPolicy === "autonomous_safe"
+      ? "Autonomous local + catalogue recognition"
+      : "Offline grocery parsing · dish expansion needs hosted planning"
+    : "Dish-to-ingredient expansion";
 
   if (state.availableProviders.length) {
     ui.providerSelect.innerHTML = state.availableProviders.map((provider) =>
@@ -1019,7 +1239,10 @@ function applyProviderStatus(status) {
   const ready = status.connected
     && !status.requires_address
     && (state.provider !== "instamart" || Boolean(status.selected_address_id));
-  ui.draftButton.disabled = !ready;
+  state.providerReady = ready;
+  // Local transcription review works without a provider connection. The
+  // reviewed-list action checks readiness immediately before any provider call.
+  ui.draftButton.disabled = false;
   if (status.message && !ready) showRequestError(status.message);
   else if (state.providerConnected) showRequestError("");
 }

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import secrets
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from uuid import uuid4
 
@@ -41,10 +42,26 @@ class ComparisonService:
     ):
         self.providers = providers
         self.settings = settings
-        self.proposals: dict[str, ComparisonProposal] = {}
-        self.operations: dict[str, ComparisonOperation] = {}
-        self._confirmations: dict[str, _Confirmation] = {}
+        self.proposals: OrderedDict[str, ComparisonProposal] = OrderedDict()
+        self.operations: OrderedDict[str, ComparisonOperation] = OrderedDict()
+        self._confirmations: OrderedDict[str, _Confirmation] = OrderedDict()
         self._lock = asyncio.Lock()
+
+    def _remember(self, store: OrderedDict, key: str, value) -> None:
+        store[key] = value
+        store.move_to_end(key)
+        while len(store) > self.settings.max_state_records:
+            store.popitem(last=False)
+
+    def _purge_expired_confirmations(self) -> None:
+        now = time.monotonic()
+        expired = [
+            token
+            for token, confirmation in self._confirmations.items()
+            if confirmation.expires_at < now
+        ]
+        for token in expired:
+            self._confirmations.pop(token, None)
 
     def _selected(self, provider_ids: list[str]) -> dict[str, GroceryProvider]:
         unique_ids = list(dict.fromkeys(provider_ids))
@@ -149,17 +166,22 @@ class ComparisonService:
 
         token: str | None = None
         if mode == "verified" and can_continue and proposal_id:
+            self._purge_expired_confirmations()
             proposal = self.proposals.get(proposal_id)
             expected = tuple(proposal.provider_ids) if proposal else ()
             requested = tuple(eligible)
             if proposal is not None and requested == expected:
                 token = secrets.token_urlsafe(32)
-                self._confirmations[token] = _Confirmation(
-                    proposal_id=proposal_id,
-                    provider_ids=requested,
-                    expires_at=(
-                        time.monotonic()
-                        + self.settings.comparison_confirmation_ttl_seconds
+                self._remember(
+                    self._confirmations,
+                    token,
+                    _Confirmation(
+                        proposal_id=proposal_id,
+                        provider_ids=requested,
+                        expires_at=(
+                            time.monotonic()
+                            + self.settings.comparison_confirmation_ttl_seconds
+                        ),
                     ),
                 )
                 proposal.frozen = True
@@ -228,7 +250,7 @@ class ComparisonService:
             provider_ids=eligible_ids,
             drafts=drafts,
         )
-        self.proposals[proposal.id] = proposal
+        self._remember(self.proposals, proposal.id, proposal)
         return proposal
 
     def override(
@@ -378,7 +400,7 @@ class ComparisonService:
                 provider_ids=list(confirmation.provider_ids),
                 report=report,
             )
-            self.operations[operation.id] = operation
+            self._remember(self.operations, operation.id, operation)
             return operation
 
     async def choose(

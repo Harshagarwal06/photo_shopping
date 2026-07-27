@@ -6,18 +6,27 @@ import re
 from .models import CartConstraints, DraftCart, DraftItem, PlannedItem, Product
 
 
+MEASURE_UNIT_PATTERN = (
+    r"kg|g|gm|grams?|l|ltr|litres?|liters?|ml|pcs?|pieces?|count|eggs?|units?"
+)
 MEASURE_RE = re.compile(
-    r"(?P<amount>\d+(?:\.\d+)?)\s*(?P<unit>kg|g|gm|grams?|l|ltr|litres?|liters?|ml|pcs?|pieces?|count|eggs?|units?)\b",
+    rf"(?P<amount>\d+(?:\.\d+)?)\s*(?P<unit>{MEASURE_UNIT_PATTERN})\b",
+    re.IGNORECASE,
+)
+MULTIPACK_MEASURE_RE = re.compile(
+    rf"(?P<count>\d+(?:\.\d+)?)\s*x\s*(?P<amount>\d+(?:\.\d+)?)\s*"
+    rf"(?P<unit>{MEASURE_UNIT_PATTERN})\b",
+    re.IGNORECASE,
+)
+REVERSED_MULTIPACK_MEASURE_RE = re.compile(
+    rf"(?P<amount>\d+(?:\.\d+)?)\s*(?P<unit>{MEASURE_UNIT_PATTERN})\s*"
+    r"x\s*(?P<count>\d+(?:\.\d+)?)\b",
     re.IGNORECASE,
 )
 
 
-def parse_measurement(text: str) -> tuple[float, str] | None:
-    match = MEASURE_RE.search(text.replace("×", "x"))
-    if not match:
-        return None
-    amount = float(match.group("amount"))
-    unit = match.group("unit").lower()
+def _normalise_measurement(amount: float, unit: str) -> tuple[float, str]:
+    unit = unit.lower()
     if unit == "kg":
         return amount * 1000, "g"
     if unit in {"g", "gm", "gram", "grams"}:
@@ -27,6 +36,31 @@ def parse_measurement(text: str) -> tuple[float, str] | None:
     if unit == "ml":
         return amount, "ml"
     return amount, "count"
+
+
+def parse_measurement(text: str) -> tuple[float, str] | None:
+    normalized = text.replace("×", "x")
+    multipack = (
+        MULTIPACK_MEASURE_RE.search(normalized)
+        or REVERSED_MULTIPACK_MEASURE_RE.search(normalized)
+    )
+    if multipack:
+        return _normalise_measurement(
+            float(multipack.group("count")) * float(multipack.group("amount")),
+            multipack.group("unit"),
+        )
+
+    matches = list(MEASURE_RE.finditer(normalized))
+    if not matches:
+        return None
+    converted = [
+        _normalise_measurement(float(match.group("amount")), match.group("unit"))
+        for match in matches
+    ]
+    dimensions = {dimension for _, dimension in converted}
+    if len(converted) > 1 and len(dimensions) == 1 and "+" in normalized:
+        return sum(amount for amount, _ in converted), converted[0][1]
+    return converted[0]
 
 
 def requested_measurement(item: PlannedItem) -> tuple[float, str] | None:
@@ -100,8 +134,15 @@ def enforce_constraints(
         selected = item.selected_product
         if cap is not None and selected and selected.price * item.units_to_add > cap:
             alternatives = []
+            # Imported lazily because matcher imports this module for quantity
+            # arithmetic. The same fail-closed relevance gate must also apply to
+            # cap-driven replacements.
+            from .matcher import _match_is_reasonable
+
             for candidate in item.candidates:
                 if not candidate.in_stock:
+                    continue
+                if not _match_is_reasonable(item.planned, candidate)[0]:
                     continue
                 units = units_for_candidate(item.planned, candidate)
                 if candidate.price * units <= cap:

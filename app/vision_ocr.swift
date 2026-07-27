@@ -36,8 +36,10 @@ let ciContext = CIContext()
 struct Reading {
     let y: Double
     let x: Double
-    let text: String
-    let confidence: Float
+    let width: Double
+    let height: Double
+    let scale: CGFloat
+    let candidates: [VNRecognizedText]
 }
 
 func readings(scale: CGFloat) -> [Reading] {
@@ -54,20 +56,151 @@ func readings(scale: CGFloat) -> [Reading] {
     request.recognitionLevel = .accurate
     request.usesLanguageCorrection = true
     request.recognitionLanguages = ["en-US"]
+    // Vision's language model is general-purpose. Supplying common grocery
+    // categories, quantities, and Indian retail brands gives its alternate
+    // candidates a useful domain prior without forcing any one answer.
+    request.customWords = [
+        "Amul", "Aashirvaad", "Britannia", "Cadbury", "Daawat", "Fortune",
+        "Kellogg's", "KitKat", "Knorr", "Kurkure", "Maggi", "Mother Dairy",
+        "Oreo", "Pintola", "Real", "Rin", "Tata",
+        "atta", "basmati", "besan", "bhindi", "bread", "butter", "cheese",
+        "chicken breast", "chilli", "cocoa powder", "coffee", "cornflakes",
+        "curd", "dal", "detergent bar", "eggs", "flour", "fruit juice",
+        "ghee", "ice cream sandwich", "juice", "litres", "loaf", "masala",
+        "milk", "mixed fruit", "oil", "oregano", "paneer", "peanut butter",
+        "pencil box", "Puffcorn", "rice", "salt", "soap", "soup powder",
+        "sugar", "tea", "tomato", "tomato soup powder", "turmeric", "water"
+    ]
     guard (try? VNImageRequestHandler(cgImage: rendered, options: [:]).perform([request])) != nil
     else {
         return []
     }
     return (request.results ?? []).compactMap { observation in
-        observation.topCandidates(1).first.map { candidate in
-            Reading(
+        let candidates = observation.topCandidates(5)
+        return candidates.isEmpty
+            ? nil
+            : Reading(
                 y: Double(observation.boundingBox.midY),
                 x: Double(observation.boundingBox.minX),
-                text: candidate.string,
-                confidence: candidate.confidence
+                width: Double(observation.boundingBox.width),
+                height: Double(observation.boundingBox.height),
+                scale: scale,
+                candidates: candidates
             )
+    }
+}
+
+struct CandidateOutput: Codable {
+    let confidence: Float
+    let text: String
+}
+
+struct LineOutput: Codable {
+    let x: Double
+    let y: Double
+    let width: Double
+    let height: Double
+    let candidates: [CandidateOutput]
+}
+
+func verticalOverlap(_ first: Reading, _ second: Reading) -> Double {
+    let firstMin = first.y - first.height / 2
+    let firstMax = first.y + first.height / 2
+    let secondMin = second.y - second.height / 2
+    let secondMax = second.y + second.height / 2
+    let overlap = max(0, min(firstMax, secondMax) - max(firstMin, secondMin))
+    return overlap / max(0.0001, min(first.height, second.height))
+}
+
+func horizontalGap(_ first: Reading, _ second: Reading) -> Double {
+    let firstMax = first.x + first.width
+    let secondMax = second.x + second.width
+    if firstMax < second.x {
+        return second.x - firstMax
+    }
+    if secondMax < first.x {
+        return first.x - secondMax
+    }
+    return 0
+}
+
+func horizontalOverlapRatio(_ first: Reading, _ second: Reading) -> Double {
+    let overlap = max(
+        0,
+        min(first.x + first.width, second.x + second.width) - max(first.x, second.x)
+    )
+    return overlap / max(0.0001, min(first.width, second.width))
+}
+
+func belongsToLine(_ reading: Reading, _ group: [Reading]) -> Bool {
+    group.contains { existing in
+        // Adjacent notebook rows can be only ~0.019 apart. A looser vertical
+        // tolerance is safe only for left-to-right fragments that do not occupy
+        // the same horizontal space; overlapping fragments at that distance
+        // belong to adjacent rows.
+        let delta = abs(reading.y - existing.y)
+        let gap = horizontalGap(reading, existing)
+        if delta <= 0.013 {
+            return gap <= 0.12
+        }
+        return delta <= 0.022
+            && gap <= 0.04
+            && horizontalOverlapRatio(reading, existing) < 0.4
+    }
+}
+
+func output(for group: [Reading]) -> LineOutput? {
+    guard !group.isEmpty else { return nil }
+    var alternatives: [CandidateOutput] = []
+    var seen = Set<String>()
+
+    // OCR sometimes emits a whole line at one scale and several word fragments
+    // at another. Reconstruct each scale independently, left to right, and keep
+    // several ranked alternatives instead of discarding everything but top-1.
+    let scales = Dictionary(grouping: group, by: { $0.scale })
+    for scale in recognitionScales {
+        guard let observations = scales[scale] else { continue }
+        let ordered = observations.sorted(by: { $0.x < $1.x })
+        let maximumRank = ordered.map(\.candidates.count).max() ?? 0
+        for rank in 0..<min(5, maximumRank) {
+            let chosen = ordered.compactMap { observation -> VNRecognizedText? in
+                guard !observation.candidates.isEmpty else { return nil }
+                return observation.candidates[min(rank, observation.candidates.count - 1)]
+            }
+            let text = chosen.map(\.string).joined(separator: " ")
+                .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = text.folding(options: [.caseInsensitive, .diacriticInsensitive],
+                                   locale: Locale(identifier: "en_US"))
+            guard !text.isEmpty, !seen.contains(key) else { continue }
+            seen.insert(key)
+            let confidence = chosen.isEmpty
+                ? 0
+                : chosen.map(\.confidence).reduce(0, +) / Float(chosen.count)
+            alternatives.append(CandidateOutput(confidence: confidence, text: text))
         }
     }
+
+    alternatives.sort { first, second in
+        if first.confidence != second.confidence {
+            return first.confidence > second.confidence
+        }
+        if first.text.count != second.text.count {
+            return first.text.count > second.text.count
+        }
+        return first.text.localizedStandardCompare(second.text) == .orderedAscending
+    }
+    let minX = group.map(\.x).min() ?? 0
+    let maxX = group.map({ $0.x + $0.width }).max() ?? minX
+    let minY = group.map({ $0.y - $0.height / 2 }).min() ?? 0
+    let maxY = group.map({ $0.y + $0.height / 2 }).max() ?? minY
+    return LineOutput(
+        x: minX,
+        y: (minY + maxY) / 2,
+        width: maxX - minX,
+        height: maxY - minY,
+        candidates: Array(alternatives.prefix(12))
+    )
 }
 
 let allReadings = recognitionScales.flatMap(readings(scale:))
@@ -76,44 +209,27 @@ if allReadings.isEmpty {
     exit(4)
 }
 
-// Group the same physical line of writing across the scales. Position must match
-// horizontally as well as vertically, so two separate runs of text side by side
-// stay two lines instead of one silently swallowing the other.
-let lineTolerance = 0.012
-let columnTolerance = 0.06
 var lines: [[Reading]] = []
 for reading in allReadings.sorted(by: { $0.y > $1.y }) {
-    let existing = lines.firstIndex { group in
-        guard let first = group.first else { return false }
-        return abs(first.y - reading.y) < lineTolerance
-            && abs(first.x - reading.x) < columnTolerance
-    }
-    if let existing {
+    if let existing = lines.firstIndex(where: { belongsToLine(reading, $0) }) {
         lines[existing].append(reading)
     } else {
         lines.append([reading])
     }
 }
 
-let ordered = lines.sorted { first, second in
-    guard let a = first.first, let b = second.first else { return false }
-    // The same tolerance the grouping uses: a coarser one here lets two adjacent
-    // lines fall into the left-to-right tiebreak and swap places.
-    if abs(a.y - b.y) > lineTolerance {
-        return a.y > b.y
+let ordered = lines.compactMap(output(for:)).sorted { first, second in
+    if abs(first.y - second.y) > 0.01 {
+        return first.y > second.y
     }
-    return a.x < b.x
+    return first.x < second.x
 }
 
+let encoder = JSONEncoder()
+encoder.outputFormatting = [.sortedKeys]
 for line in ordered {
-    // Vision's own confidence picks the better reading more often than preferring
-    // the longest string does: 23 of 31 expected terms against 20.
-    let best = line.max { first, second in
-        (first.confidence, first.text.count) < (second.confidence, second.text.count)
-    }
-    if let best {
-        // Confidence first, tab separated: the caller drops readings too poor to
-        // shop from, and says how many it dropped.
-        print("\(best.confidence)\t\(best.text)")
+    if let data = try? encoder.encode(line),
+       let json = String(data: data, encoding: .utf8) {
+        print(json)
     }
 }

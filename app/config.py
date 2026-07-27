@@ -24,6 +24,16 @@ class Settings(BaseSettings):
     matcher_model_id: str | None = None
     hf_token: str | None = None
     hf_provider: str = "auto"
+    nvidia_api_key: str | None = None
+    nvidia_api_base_url: str = "https://integrate.api.nvidia.com/v1"
+    nvidia_model_id: str = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
+    nvidia_reasoning_budget: int = Field(default=128, ge=0, le=4096)
+    cloud_model_backend: Literal["auto", "hf", "nvidia"] = "auto"
+    recognition_policy: Literal["review", "autonomous_safe"] = "review"
+    autonomous_accept_confidence: float = Field(default=0.88, ge=0.5, le=1)
+    autonomous_catalog_confidence: float = Field(default=0.70, ge=0.5, le=1)
+    autonomous_catalog_min_providers: int = Field(default=2, ge=1, le=3)
+    autonomous_max_hypotheses: int = Field(default=3, ge=1, le=5)
     local_vision_fallback: bool = True
 
     grocery_provider: Literal["blinkit", "instamart", "zepto"] = "blinkit"
@@ -50,6 +60,7 @@ class Settings(BaseSettings):
     max_fill_ratio: float = Field(default=1.1, ge=1)
     eta_tiebreak_rupees: float = Field(default=20.0, ge=0)
     comparison_confirmation_ttl_seconds: int = Field(default=300, ge=30, le=1800)
+    max_state_records: int = Field(default=200, ge=10, le=5000)
     order_history_limit: int = Field(default=5, ge=0, le=20)
     search_result_limit: int = Field(default=5, ge=1, le=10)
     navigation_timeout_ms: int = Field(default=30_000, ge=5_000)
@@ -61,6 +72,33 @@ class Settings(BaseSettings):
     @property
     def matcher_model(self) -> str:
         return self.matcher_model_id or self.model_id
+
+    @property
+    def cloud_backend(self) -> Literal["hf", "nvidia"] | None:
+        """Resolve the explicitly requested cloud provider, preferring NVIDIA."""
+        if self.cloud_model_backend == "nvidia":
+            return "nvidia" if self.nvidia_api_key else None
+        if self.cloud_model_backend == "hf":
+            return "hf" if self.hf_token else None
+        if self.nvidia_api_key:
+            return "nvidia"
+        if self.hf_token:
+            return "hf"
+        return None
+
+    @property
+    def cloud_model(self) -> str:
+        return self.nvidia_model_id if self.cloud_backend == "nvidia" else self.planner_model
+
+    def model_backend_configured(self, backend: str | None = None) -> bool:
+        selected = backend or self.model_backend
+        if selected == "local":
+            return True
+        if selected == "hf":
+            return bool(self.hf_token)
+        if selected == "nvidia":
+            return bool(self.nvidia_api_key)
+        return False
 
     @property
     def cart_mutations_allowed(self) -> bool:

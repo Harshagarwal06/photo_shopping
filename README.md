@@ -11,6 +11,12 @@ Zepto use isolated local browser profiles.
 ## What is implemented
 
 - English, Hindi, and Hinglish request parsing plus on-device macOS Vision OCR.
+- A pre-search transcription review with handwriting crops, alternative readings,
+  editable brands/quantities, and uncertain lines excluded by default.
+- Semantic OCR confidence, duplicate/page-number filtering, and a fail-closed product
+  relevance gate so malformed handwriting cannot silently select an unrelated item.
+- An explicit optional cloud retry that sends only uncertain line crops, never the
+  complete photograph.
 - A common provider interface with Blinkit and Instamart active side by side.
 - Official Instamart OAuth 2.1 with PKCE and dynamic client registration.
 - OAuth tokens stored in the macOS Keychain, never in the browser or project files.
@@ -37,8 +43,22 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-For hosted request parsing, add a Hugging Face token to `.env`. Typed grocery requests
-can fall back to the local parser when hosted inference is unavailable.
+For hosted request parsing, add a Hugging Face or NVIDIA API key to `.env`. NVIDIA's
+hosted vision model is the preferred second opinion for uncertain handwriting:
+
+```dotenv
+MODEL_BACKEND=local
+NVIDIA_API_KEY=nvapi_your_key_here
+NVIDIA_MODEL_ID=nvidia/nemotron-3-nano-omni-30b-a3b-reasoning
+CLOUD_MODEL_BACKEND=nvidia
+RECOGNITION_POLICY=autonomous_safe
+```
+
+Typed grocery requests can fall back to the local parser when hosted inference is
+unavailable.
+The local parser handles common English, Hindi, and Hinglish grocery terms, quantities,
+budgets, brands, and price preferences; general dish-to-ingredient expansion requires
+hosted planning.
 
 ## Configure Instamart
 
@@ -73,6 +93,20 @@ uvicorn app.main:app --reload
 Open [http://127.0.0.1:8000](http://127.0.0.1:8000), choose **Blinkit** or **Swiggy
 Instamart** from the provider selector, and connect that service. Instamart returns to
 the local app after its OAuth flow; Blinkit keeps the existing saved browser session.
+
+For a photographed request, the app reads the image locally first and pauses before any
+provider search. Review the recognized product, brand, quantity, and unit. Low-confidence
+lines are unchecked, so they cannot be searched accidentally. Editing a line checks it
+for inclusion. If a hosted-model key is configured, **Retry uncertain lines with NVIDIA
+vision** sends only those cropped lines after the button is selected; failure leaves the
+local review unchanged. Successful cloud suggestions remain unchecked until you confirm
+them manually.
+
+With `RECOGNITION_POLICY=autonomous_safe`, the editable transcription checkpoint is
+replaced by an automatic decision stage. Local Vision, an independent hosted suggestion,
+and selected-provider catalogue results are scored together. Strong readings continue
+automatically; unresolved lines are skipped without searching or adding a product. Set
+the policy back to `review` to restore the manual checkpoint.
 
 The app is currently configured for port `8000`; the OAuth redirect URI must use the
 same port and `localhost` host.
@@ -122,9 +156,13 @@ playwright install chromium
 real cart.
 
 ```bash
-pytest
+.venv/bin/python -m pytest
 ```
 
 The tests cover OAuth state/PKCE, MCP tool allowlisting, Instamart response mapping,
-ranking data, cart merging and verification, mutation idempotency, and the checkout
-safety boundary.
+ranking data, cart merging and verification, mutation idempotency, the checkout safety
+boundary, and real macOS Vision regressions for numbered and quantity-heavy handwritten
+lists.
+
+The broader degraded-photo, parsing, matching, provider, and security results are in
+[the 27 July project scenario audit](docs/project-scenario-audit-2026-07-27.md).

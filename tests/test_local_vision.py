@@ -135,12 +135,17 @@ def test_misread_terms_resolve(line, term):
         "dal",
         "ghee",
         "toor dal",
-        "Amul Butter",
         "tea",
     ],
 )
 def test_known_and_unknown_words_are_never_fuzzed_onto_something_else(line):
     assert _parse_item(line, "photo").search_term == line
+
+
+def test_known_leading_brand_moves_to_selection_context():
+    item = _parse_item("Amul Butter", "photo")
+
+    assert (item.search_term, item.context) == ("Butter", "Amul")
 
 
 @pytest.mark.parametrize(
@@ -270,13 +275,10 @@ def test_the_bracket_repair_needs_an_unclosed_bracket(line):
     assert (item.search_term, item.context) == (line, "")
 
 
-@pytest.mark.parametrize("line", ["1/0 kg broken", "0 kg nothing"])
-def test_unusable_quantity_falls_back_instead_of_raising(line):
-    """A zero denominator must not divide by zero, and 0 fails PlannedItem's gt=0."""
-    item = _parse_item(line, "photo")
-
-    assert item is not None
-    assert item.quantity == 1
+@pytest.mark.parametrize("line", ["1/0 kg broken", "0 kg nothing", "-2 milk"])
+def test_unusable_or_negative_quantity_is_rejected(line):
+    """An invalid amount must not turn into a confirmed one-item provider search."""
+    assert _parse_item(line, "photo") is None
 
 
 def test_local_planner_combines_typed_and_recognized_items(monkeypatch):
@@ -295,6 +297,107 @@ def test_local_planner_combines_typed_and_recognized_items(monkeypatch):
     assert [item.quantity for item in plan.items] == [2, 12, 2]
     assert plan.constraints.cart_budget == 800
     assert "locally on this Mac" in plan.processing_note
+
+
+@pytest.mark.parametrize(
+    ("line", "term", "quantity", "unit"),
+    [
+        ("Milk (2 litres)", "Milk", 2, "l"),
+        ("Bread (one loaf)", "Bread", 1, "pack"),
+        ("Cornflakes -> 2 boxes", "Cornflakes", 2, "pack"),
+        ("juice two cartons", "juice", 2, "pack"),
+    ],
+)
+def test_written_number_container_and_arrow_quantities(line, term, quantity, unit):
+    item = _parse_item(line, "photo")
+
+    assert (item.search_term, item.quantity, item.unit) == (term, quantity, unit)
+
+
+@pytest.mark.parametrize(
+    ("line", "term", "quantity", "unit"),
+    [
+        ("eggs 12", "eggs", 12, "count"),
+        ("bananas x6", "bananas", 6, "count"),
+        ("2 x 1 l milk", "milk", 2, "l"),
+        ("rice 2 x 500 g", "rice", 1000, "g"),
+    ],
+)
+def test_common_trailing_and_multiplied_quantities(line, term, quantity, unit):
+    item = _parse_item(line, "photo")
+
+    assert (item.search_term, item.quantity, item.unit) == (term, quantity, unit)
+
+
+def test_reversed_currency_budget_does_not_crash_or_become_an_item():
+    plan = plan_locally(
+        text="₹800 budget, milk",
+        image_bytes=None,
+        image_media_type="image/jpeg",
+    )
+
+    assert plan.constraints.cart_budget == 800
+    assert [item.search_term for item in plan.items] == ["milk"]
+
+
+def test_common_devanagari_grocery_terms_and_units_parse_locally():
+    plan = plan_locally(
+        text="दूध 2 लीटर, अंडे 12",
+        image_bytes=None,
+        image_media_type="image/jpeg",
+    )
+
+    assert [
+        (item.search_term, item.quantity, item.unit) for item in plan.items
+    ] == [("milk", 2, "l"), ("eggs", 12, "count")]
+
+
+def test_local_parser_preserves_products_with_and_in_their_name():
+    plan = plan_locally(
+        text="Johnson and Johnson baby powder, Head and Shoulders shampoo, mac and cheese",
+        image_bytes=None,
+        image_media_type="image/jpeg",
+    )
+
+    assert [item.search_term.casefold() for item in plan.items] == [
+        "johnson & johnson baby powder",
+        "head & shoulders shampoo",
+        "mac & cheese",
+    ]
+
+
+def test_cheapest_is_a_preference_not_a_required_product_word():
+    plan = plan_locally(
+        text="cheapest milk",
+        image_bytes=None,
+        image_media_type="image/jpeg",
+    )
+
+    assert plan.items[0].search_term == "milk"
+    assert plan.items[0].provider_query == "milk"
+    assert "lowest total price" in plan.items[0].context
+    assert plan.constraints.preferences == ["cheapest"]
+
+
+def test_probable_merged_food_and_nonfood_rows_require_review():
+    item = _parse_item(
+        "Rin soap ice cream sandwich",
+        "photo",
+        vision_confidence=1,
+    )
+
+    assert item.needs_review is True
+    assert any("merged" in note for note in item.recognition_notes)
+
+
+@pytest.mark.parametrize("line", ["Inau tomato soup powder", "lucream sandwich"])
+def test_unresolved_words_are_not_auto_approved_by_looser_confidence_fuzzing(line):
+    assert _parse_item(line, "photo", vision_confidence=1).needs_review is True
+
+
+@pytest.mark.parametrize("line", ["8.", "12)", "•", "Page No."])
+def test_standalone_page_markers_are_not_products(line):
+    assert _parse_item(line, "photo") is None
 
 
 def test_unreadable_lines_are_skipped_and_disclosed(monkeypatch):

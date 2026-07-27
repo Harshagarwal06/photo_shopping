@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import math
 import re
+from difflib import SequenceMatcher
 
 from pydantic import ValidationError
 
 from .config import Settings
 from .constraints import parse_measurement, requested_measurement, units_for_candidate
-from .llm import HFModelClient, ModelBackendError
+from .llm import HFModelClient, ModelBackendError, NvidiaModelClient
 from .models import CrossPlatformMatch, MatchDecision, PlannedItem, Product
 
 
@@ -22,6 +23,12 @@ Schema: {"product_id": "candidate id", "units_to_add": 1, "reason": "short reaso
 """
 
 
+def _hosted_client(settings: Settings):
+    if settings.model_backend == "nvidia":
+        return NvidiaModelClient(settings)
+    return HFModelClient(settings)
+
+
 TOKEN_RE = re.compile(r"[a-z0-9]+")
 IGNORED_TOKENS = {
     "a",
@@ -29,20 +36,143 @@ IGNORED_TOKENS = {
     "and",
     "for",
     "fresh",
+    "bottle",
+    "box",
+    "can",
+    "carton",
+    "loaf",
     "of",
     "pack",
     "packet",
     "the",
     "with",
 }
+KNOWN_BRAND_PHRASES = {
+    "aashirvaad", "amul", "britannia", "cadbury", "daawat", "fortune",
+    "kelloggs", "knorr", "kurkure", "maggi", "mother dairy", "oreo",
+    "pintola", "real", "rin", "tata",
+}
+MATCH_SYNONYMS = {
+    "dishwashing": {"dishwash"},
+    "dishwash": {"dishwashing"},
+    "liquid": {"gel"},
+    "gel": {"liquid"},
+}
+MATCH_TOKEN_ALIASES = {
+    "cao": "cow",
+    "mill": "milk",
+}
+REQUIRED_MODIFIER_GROUPS = {
+    "boneless": {"boneless"},
+    "brown": {"brown"},
+    "decaf": {"decaf", "decaffeinated"},
+    "fat free": {"fat free", "zero fat"},
+    "gluten free": {"gluten free"},
+    "lactose free": {"lactose free"},
+    "low fat": {"low fat", "skimmed", "slim"},
+    "no added sugar": {"no added sugar", "zero added sugar"},
+    "organic": {"organic"},
+    "skinless": {"skinless"},
+    "sugar free": {"sugar free", "no sugar", "zero sugar"},
+    "vegan": {"vegan"},
+    "whole wheat": {"whole wheat", "100 whole wheat"},
+}
+ORDER_SENSITIVE_PHRASES = {
+    # "chai masala" is a spice; "masala chai/tea" is the prepared tea product.
+    "masala chai": {"masala chai", "masala tea"},
+}
 
 
 def _tokens(value: str) -> set[str]:
     return {
-        token
+        MATCH_TOKEN_ALIASES.get(token, token)
         for token in TOKEN_RE.findall(value.casefold())
         if token not in IGNORED_TOKENS and not token.isdigit()
     }
+
+
+def _token_similarity(query: str, candidate: str) -> float:
+    if query == candidate or candidate in MATCH_SYNONYMS.get(query, set()):
+        return 1.0
+    return SequenceMatcher(None, query, candidate).ratio()
+
+
+def _contains_phrase(value: str, phrase: str) -> bool:
+    pattern = re.escape(phrase.casefold()).replace(r"\ ", r"\s+")
+    return re.search(rf"(?<![a-z0-9]){pattern}(?![a-z0-9])", value.casefold()) is not None
+
+
+def _match_is_reasonable(item: PlannedItem, product: Product) -> tuple[bool, str]:
+    """Fail closed when provider search results have no credible request relation."""
+    if item.needs_review and not item.confirmed:
+        return False, "The transcription needs review before product matching."
+    query_tokens = _tokens(item.search_term)
+    name_tokens = _tokens(product.name)
+    context = item.context.casefold()
+    requested_brands = {
+        brand for brand in KNOWN_BRAND_PHRASES if _contains_phrase(context, brand)
+    }
+    # Indian shopping lists commonly call a Rin detergent bar "Rin soap".
+    # Keep this equivalence brand-scoped so a generic request for bathing soap
+    # cannot silently select a laundry product.
+    if (
+        ("rin" in requested_brands or "rin" in query_tokens)
+        and "soap" in query_tokens
+        and {"detergent", "bar"} <= name_tokens
+    ):
+        name_tokens.add("soap")
+    # Some provider titles use only a dairy brand/variant name ("Amul Taaza")
+    # and rely on the search page to supply the missing category.
+    if (
+        query_tokens == {"milk"}
+        and re.search(r"\b(?:ml|l|litre|liter)\b", product.pack_size.casefold())
+        and name_tokens
+        & {"amul", "chitale", "cow", "dairy", "mother", "taaza", "toned"}
+    ):
+        name_tokens.add("milk")
+    if not query_tokens or not name_tokens:
+        return False, "No meaningful product words overlap."
+
+    request_text = f"{item.search_term} {item.context}".casefold()
+    product_text = product.name.casefold()
+    for requested_phrase, accepted_phrases in ORDER_SENSITIVE_PHRASES.items():
+        if not _contains_phrase(request_text, requested_phrase):
+            continue
+        if not any(_contains_phrase(product_text, phrase) for phrase in accepted_phrases):
+            return False, f"The requested phrase “{requested_phrase}” is not present."
+    for modifier, accepted_phrases in REQUIRED_MODIFIER_GROUPS.items():
+        if not _contains_phrase(request_text, modifier):
+            continue
+        if not any(_contains_phrase(product_text, phrase) for phrase in accepted_phrases):
+            return False, f"The required modifier “{modifier}” is not present."
+
+    matched = 0
+    similarities: list[float] = []
+    for query in query_tokens:
+        best = max((_token_similarity(query, name) for name in name_tokens), default=0)
+        similarities.append(best)
+        threshold = 0.65 if len(query) <= 2 else 0.72 if len(query) <= 4 else 0.78
+        if best >= threshold:
+            matched += 1
+    required = 1 if len(query_tokens) == 1 else math.ceil(len(query_tokens) * 2 / 3)
+    if matched < required:
+        return False, (
+            f"Only {matched} of {len(query_tokens)} request words plausibly match "
+            "this product."
+        )
+
+    product_name = product.name.casefold()
+    missing_brand = next(
+        (
+            brand
+            for brand in requested_brands
+            if not _contains_phrase(product_name, brand)
+        ),
+        None,
+    )
+    if missing_brand:
+        return False, f"The requested brand {missing_brand.title()} is not present."
+    return True, ""
 
 
 def _quantity_fit(item: PlannedItem, product: Product, units: int) -> tuple[float, str | None]:
@@ -85,13 +215,18 @@ def _score_candidate(
     if relevance >= 0.75:
         reasons.append("strong request match")
 
-    score += POSITION_WEIGHT / (1 + position)
+    prefer_lowest_price = bool(
+        re.search(r"\b(?:cheapest|lowest|affordable)\b", item.context, re.IGNORECASE)
+    )
+    position_weight = POSITION_WEIGHT / 2 if prefer_lowest_price else POSITION_WEIGHT
+    score += position_weight / (1 + position)
     if position == 0:
         reasons.append("the top result for this search")
 
     total = product.price * units
     if total > 0:
-        score += 15.0 * min(1.0, lowest_total / total)
+        price_weight = 30.0 if prefer_lowest_price else 15.0
+        score += price_weight * min(1.0, lowest_total / total)
     reasons.append(f"₹{total:g} for {units} pack{'s' if units != 1 else ''}")
 
     quantity_score, quantity_reason = _quantity_fit(item, product, units)
@@ -127,9 +262,23 @@ def _score_candidate(
 
 
 def _fallback_match(item: PlannedItem, candidates: list[Product]) -> MatchDecision:
-    available = [candidate for candidate in candidates if candidate.in_stock]
+    if item.needs_review and not item.confirmed:
+        return MatchDecision(
+            product_id=None,
+            units_to_add=0,
+            reason="Review this transcription before searching for a product.",
+        )
+    available = [
+        candidate
+        for candidate in candidates
+        if candidate.in_stock and _match_is_reasonable(item, candidate)[0]
+    ]
     if not available:
-        return MatchDecision(product_id=None, units_to_add=0, reason="No in-stock match found.")
+        return MatchDecision(
+            product_id=None,
+            units_to_add=0,
+            reason="No confident product match found; edit or confirm the request.",
+        )
     candidate_units = [(candidate, units_for_candidate(item, candidate)) for candidate in available]
     lowest_total = min(candidate.price * units for candidate, units in candidate_units)
     scored: list[tuple[float, float, int, Product, int, list[str]]] = []
@@ -192,7 +341,7 @@ def match_product(
         "Pick the best candidate and units."
     )
     try:
-        payload = HFModelClient(settings).complete_json(
+        payload = _hosted_client(settings).complete_json(
             model=settings.matcher_model,
             system=MATCHER_SYSTEM,
             prompt=prompt,
@@ -209,6 +358,14 @@ def match_product(
     valid_ids = {candidate.id for candidate in candidates if candidate.in_stock}
     if decision.product_id not in valid_ids:
         raise ModelBackendError("The matcher selected an unavailable or unknown product.")
+    selected = next(candidate for candidate in candidates if candidate.id == decision.product_id)
+    reasonable, reason = _match_is_reasonable(item, selected)
+    if not reasonable:
+        return MatchDecision(
+            product_id=None,
+            units_to_add=0,
+            reason=f"No confident product match found: {reason}",
+        )
     return decision
 
 
@@ -252,7 +409,7 @@ def match_across_platforms(
         "Pick the most comparable product on each platform."
     )
     try:
-        raw = HFModelClient(settings).complete_json(
+        raw = _hosted_client(settings).complete_json(
             model=settings.matcher_model,
             system=CROSS_MATCHER_SYSTEM,
             prompt=prompt,

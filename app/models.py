@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import re
 from enum import StrEnum
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, computed_field, field_validator
+
+
+PROVIDER_QUERY_BRANDS = (
+    "aashirvaad", "amul", "britannia", "cadbury", "daawat", "fortune",
+    "kelloggs", "kitkat", "knorr", "kurkure", "maggi", "mother dairy",
+    "oreo", "pintola", "real", "rin", "tata",
+)
 
 
 class ItemSource(StrEnum):
@@ -22,11 +30,53 @@ class PlannedItem(BaseModel):
     unit: str = "item"
     raw_text: str = ""
     source: str = "direct"
+    confidence: float = Field(default=1.0, ge=0, le=1)
+    needs_review: bool = False
+    confirmed: bool = False
+    alternatives: list[str] = Field(default_factory=list)
+    recognition_notes: list[str] = Field(default_factory=list)
+    recognition_decision: Literal[
+        "accepted", "catalog_corrected", "skipped", "review"
+    ] = "accepted"
+    crop_box: list[float] = Field(default_factory=list)
 
     @field_validator("search_term", "context", "unit", "raw_text", "source", mode="before")
     @classmethod
     def clean_strings(cls, value: Any) -> str:
         return str(value or "").strip()
+
+    def _provider_brand_prefix(self) -> str:
+        matches = []
+        for brand in PROVIDER_QUERY_BRANDS:
+            match = re.search(
+                rf"(?<![a-z0-9]){re.escape(brand)}(?![a-z0-9])",
+                self.context,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                matches.append(match.group(0))
+        return " ".join(matches)
+
+    @computed_field
+    @property
+    def provider_query(self) -> str:
+        """The catalogue query, retaining a separately parsed brand or context."""
+        return " ".join(
+            part for part in (self._provider_brand_prefix(), self.search_term) if part
+        ).strip()
+
+    def apply_manual_query(self, query: str) -> None:
+        """Replace the editable provider query without retaining a stale brand."""
+        cleaned = query.strip()
+        brand_prefix = self._provider_brand_prefix()
+        context_prefix = f"{brand_prefix} ".casefold() if brand_prefix else ""
+        if context_prefix and cleaned.casefold().startswith(context_prefix):
+            self.search_term = cleaned[len(brand_prefix) :].strip()
+        else:
+            self.search_term = cleaned
+            self.context = ""
+        self.needs_review = False
+        self.confirmed = True
 
 
 class CartConstraints(BaseModel):
@@ -297,6 +347,14 @@ class SearchRequest(BaseModel):
     draft_id: str
     planned_item_id: str
     query: str = Field(min_length=1)
+
+    @field_validator("draft_id", "planned_item_id", "query", mode="before")
+    @classmethod
+    def reject_blank_search_fields(cls, value: Any) -> str:
+        cleaned = str(value or "").strip()
+        if not cleaned:
+            raise ValueError("Search fields cannot be blank.")
+        return cleaned
 
 
 class AddressSelectionRequest(BaseModel):
