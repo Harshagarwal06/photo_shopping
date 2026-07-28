@@ -28,7 +28,10 @@ class Settings(BaseSettings):
     nvidia_api_base_url: str = "https://integrate.api.nvidia.com/v1"
     nvidia_model_id: str = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
     nvidia_reasoning_budget: int = Field(default=128, ge=0, le=4096)
-    cloud_model_backend: Literal["auto", "hf", "nvidia"] = "auto"
+    groq_api_key: str | None = None
+    groq_api_base_url: str = "https://api.groq.com/openai/v1"
+    groq_model_id: str = "qwen/qwen3.6-27b"
+    cloud_model_backend: Literal["auto", "hf", "nvidia", "groq"] = "auto"
     recognition_policy: Literal["review", "autonomous_safe"] = "review"
     autonomous_accept_confidence: float = Field(default=0.88, ge=0.5, le=1)
     autonomous_catalog_confidence: float = Field(default=0.70, ge=0.5, le=1)
@@ -77,12 +80,16 @@ class Settings(BaseSettings):
         return self.matcher_model_id or self.model_id
 
     @property
-    def cloud_backend(self) -> Literal["hf", "nvidia"] | None:
-        """Resolve the explicitly requested cloud provider, preferring NVIDIA."""
+    def cloud_backend(self) -> Literal["hf", "nvidia", "groq"] | None:
+        """Resolve the requested cloud provider, preferring Groq vision in auto mode."""
+        if self.cloud_model_backend == "groq":
+            return "groq" if self.groq_api_key else None
         if self.cloud_model_backend == "nvidia":
             return "nvidia" if self.nvidia_api_key else None
         if self.cloud_model_backend == "hf":
             return "hf" if self.hf_token else None
+        if self.groq_api_key:
+            return "groq"
         if self.nvidia_api_key:
             return "nvidia"
         if self.hf_token:
@@ -91,7 +98,11 @@ class Settings(BaseSettings):
 
     @property
     def cloud_model(self) -> str:
-        return self.nvidia_model_id if self.cloud_backend == "nvidia" else self.planner_model
+        if self.cloud_backend == "groq":
+            return self.groq_model_id
+        if self.cloud_backend == "nvidia":
+            return self.nvidia_model_id
+        return self.planner_model
 
     def model_backend_configured(self, backend: str | None = None) -> bool:
         selected = backend or self.model_backend
@@ -101,6 +112,8 @@ class Settings(BaseSettings):
             return bool(self.hf_token)
         if selected == "nvidia":
             return bool(self.nvidia_api_key)
+        if selected == "groq":
+            return bool(self.groq_api_key)
         return False
 
     @property

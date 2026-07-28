@@ -188,6 +188,81 @@ def test_one_catalogue_corrects_brand_only_with_two_engine_prefixes_and_repetiti
     assert item.needs_review is False
 
 
+def test_cloud_completion_of_local_prefix_is_accepted_with_catalogue_match():
+    local = PlannedItem(
+        id="line",
+        search_term="Ma",
+        raw_text="5. Ma",
+        confidence=0.2,
+        needs_review=True,
+    )
+    cloud = local.model_copy(
+        deep=True,
+        update={
+            "search_term": "Maggi noodles",
+            "raw_text": "5. Maggi",
+            "confidence": 0.65,
+        },
+    )
+    provider = CatalogProvider(
+        "blinkit",
+        [_product("blinkit", "Maggi 2-Minute Noodles")],
+    )
+
+    result = asyncio.run(
+        resolve_plan_autonomously(
+            CartPlan(items=[local]),
+            CartPlan(items=[cloud]),
+            {"blinkit": provider},
+            _settings(),
+        )
+    )
+
+    item = result.items[0]
+    assert item.search_term == "Maggi"
+    assert item.raw_text == "5. Maggi"
+    assert item.recognition_decision == "accepted"
+    assert item.needs_review is False
+
+
+def test_contextual_cloud_read_can_resolve_without_catalogue_result():
+    local = PlannedItem(
+        id="line",
+        search_term="MAr aT Achal",
+        raw_text="MAr aT Achal (Pickle), l0gm",
+        confidence=0.2,
+        needs_review=True,
+    )
+    cloud = local.model_copy(
+        deep=True,
+        update={
+            "search_term": "Aam ka Achar",
+            "raw_text": "Aam ka Achar (Pickle), 100 gm",
+            "quantity": 100,
+            "unit": "g",
+            "confidence": 0.9,
+        },
+    )
+    provider = CatalogProvider("blinkit", [])
+
+    result = asyncio.run(
+        resolve_plan_autonomously(
+            CartPlan(items=[local]),
+            CartPlan(items=[cloud]),
+            {"blinkit": provider},
+            _settings(),
+        )
+    )
+
+    item = result.items[0]
+    assert item.search_term == "mango pickle"
+    assert item.raw_text == "Aam ka Achar (Pickle), 100 gm"
+    assert item.quantity == 100
+    assert item.unit == "g"
+    assert item.recognition_decision == "accepted"
+    assert item.needs_review is False
+
+
 def test_two_provider_brand_consensus_corrects_close_ocr_typo():
     local = PlannedItem(
         id="line",

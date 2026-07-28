@@ -2,7 +2,7 @@ import httpx
 import pytest
 
 from app.config import Settings
-from app.llm import ModelBackendError, NvidiaModelClient, parse_json_object
+from app.llm import GroqModelClient, ModelBackendError, NvidiaModelClient, parse_json_object
 
 
 def test_parse_json_object_accepts_fenced_json():
@@ -76,15 +76,89 @@ def test_nvidia_client_uses_openai_compatible_json_response(monkeypatch):
     assert captured["json"]["chat_template_kwargs"]["enable_thinking"] is False
 
 
-def test_cloud_backend_prefers_nvidia_but_respects_explicit_hf_choice():
+def test_groq_client_uses_vision_json_mode_without_reasoning(monkeypatch):
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        return httpx.Response(
+            200,
+            request=httpx.Request("POST", url),
+            json={"choices": [{"message": {"content": '{"items": []}'}}]},
+        )
+
+    monkeypatch.setattr("app.llm.httpx.post", fake_post)
+    settings = Settings(
+        _env_file=None,
+        model_backend="groq",
+        groq_api_key="gsk-test",
+        groq_api_base_url="https://example.test/openai/v1",
+    )
+
+    result = GroqModelClient(settings).complete_json(
+        model="qwen/test",
+        system="Return JSON.",
+        prompt="Read this.",
+        image_bytes=b"image",
+    )
+
+    assert result == {"items": []}
+    assert captured["url"] == "https://example.test/openai/v1/chat/completions"
+    assert captured["headers"]["Authorization"] == "Bearer gsk-test"
+    assert captured["json"]["model"] == "qwen/test"
+    assert captured["json"]["reasoning_effort"] == "none"
+    assert captured["json"]["response_format"] == {"type": "json_object"}
+    content = captured["json"]["messages"][1]["content"]
+    assert content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+
+def test_groq_client_retries_one_transient_service_failure(monkeypatch):
+    responses = iter(
+        [
+            httpx.Response(
+                503,
+                request=httpx.Request("POST", "https://example.test/chat/completions"),
+            ),
+            httpx.Response(
+                200,
+                request=httpx.Request("POST", "https://example.test/chat/completions"),
+                json={"choices": [{"message": {"content": '{"items": []}'}}]},
+            ),
+        ]
+    )
+    calls = []
+    monkeypatch.setattr(
+        "app.llm.httpx.post",
+        lambda *_args, **_kwargs: calls.append(True) or next(responses),
+    )
+    monkeypatch.setattr("app.llm.time.sleep", lambda _seconds: None)
+    settings = Settings(
+        _env_file=None,
+        model_backend="groq",
+        groq_api_key="gsk-test",
+    )
+
+    result = GroqModelClient(settings).complete_json(
+        model="qwen/test",
+        system="Return JSON.",
+        prompt="Read this.",
+    )
+
+    assert result == {"items": []}
+    assert len(calls) == 2
+
+
+def test_cloud_backend_prefers_groq_but_respects_explicit_hf_choice():
     automatic = Settings(
         _env_file=None,
         hf_token="hf-test",
         nvidia_api_key="nvapi-test",
+        groq_api_key="gsk-test",
         cloud_model_backend="auto",
     )
     explicit_hf = automatic.model_copy(update={"cloud_model_backend": "hf"})
 
-    assert automatic.cloud_backend == "nvidia"
-    assert automatic.cloud_model == automatic.nvidia_model_id
+    assert automatic.cloud_backend == "groq"
+    assert automatic.cloud_model == automatic.groq_model_id
     assert explicit_hf.cloud_backend == "hf"

@@ -8,6 +8,7 @@ const state = {
   providerName: "grocery provider",
   providerConnected: false,
   providerReady: false,
+  providerStatusMessage: "",
   cartMutationsAllowed: false,
   availableProviders: [],
   lastTotal: 0,
@@ -39,6 +40,9 @@ const ui = {
   refreshAddresses: document.querySelector("#refresh-addresses"),
   modeBadge: document.querySelector("#mode-badge"),
   dishCapability: document.querySelector("#dish-capability"),
+  shopPathTitle: document.querySelector("#shop-path-title"),
+  shopPathHelp: document.querySelector("#shop-path-help"),
+  shopModeNote: document.querySelector("#shop-mode-note"),
   progress: document.querySelector("#progress"),
   progressMessage: document.querySelector("#progress-message"),
   stages: [...document.querySelectorAll("#stage-list li")],
@@ -49,10 +53,14 @@ const ui = {
   cloudRetry: document.querySelector("#cloud-retry"),
   continueReviewed: document.querySelector("#continue-reviewed"),
   review: document.querySelector("#review"),
+  reviewTitle: document.querySelector("#review-title"),
+  reviewSummary: document.querySelector("#review-summary"),
   groups: document.querySelector("#review-groups"),
   cartFlags: document.querySelector("#cart-flags"),
   comparison: document.querySelector("#comparison"),
   comparisonSummary: document.querySelector("#comparison-summary"),
+  comparisonEditHelp: document.querySelector("#comparison-edit-help"),
+  comparisonReasonDetails: document.querySelector("#comparison-reason-details"),
   comparisonWinner: document.querySelector("#comparison-winner"),
   comparisonReasons: document.querySelector("#comparison-reasons"),
   comparisonGrid: document.querySelector("#comparison-grid"),
@@ -110,6 +118,8 @@ function setStage(name) {
     const index = order.indexOf(element.dataset.stage);
     element.classList.toggle("is-active", index === current);
     element.classList.toggle("is-done", current >= 0 && index < current);
+    if (index === current) element.setAttribute("aria-current", "step");
+    else element.removeAttribute("aria-current");
   });
 }
 
@@ -117,7 +127,47 @@ function completeStages() {
   ui.stages.forEach((element) => {
     element.classList.remove("is-active");
     element.classList.add("is-done");
+    element.removeAttribute("aria-current");
   });
+}
+
+function updateActionCopy() {
+  const providerName = state.providerName || "your shopping app";
+  ui.shopPathTitle.textContent = `Shop on ${providerName}`;
+  ui.shopModeNote.classList.remove("is-live", "is-safe");
+
+  if (state.demoMode) {
+    ui.shopPathHelp.textContent = "Try the full matching flow with sample provider data.";
+    ui.shopModeNote.textContent = "Demo mode: no shopping app or cart can be changed.";
+    ui.shopModeNote.classList.add("is-safe");
+    ui.draftButton.querySelector(".button-label").textContent = "Preview product matches";
+    return;
+  }
+
+  if (state.autoAdd) {
+    ui.shopPathHelp.textContent = `Search ${providerName} and use the closest in-stock product for each item.`;
+    ui.shopModeNote.textContent = state.providerReady
+      ? `Auto-add is on: matches will be added to ${providerName}. Checkout and payment stay off.`
+      : state.providerStatusMessage || `Connect ${providerName} above before shopping. Auto-add will be on after connection.`;
+    ui.shopModeNote.classList.add(state.providerReady ? "is-live" : "is-safe");
+    ui.draftButton.querySelector(".button-label").textContent = "Search and add";
+    return;
+  }
+
+  if (!state.cartMutationsAllowed) {
+    ui.shopPathHelp.textContent = `Preview the products ${providerName} would use for this list.`;
+    ui.shopModeNote.textContent = `Preview mode: this cannot change your ${providerName} cart.`;
+    ui.shopModeNote.classList.add("is-safe");
+    ui.draftButton.querySelector(".button-label").textContent = "Preview matches";
+    return;
+  }
+
+  ui.shopPathHelp.textContent = `Find products on ${providerName}, then review them before anything is added.`;
+  ui.shopModeNote.textContent = state.providerReady
+    ? `Review mode: you approve the selected products and pack counts before adding them.`
+    : state.providerStatusMessage || `Connect ${providerName} above before shopping.`;
+  ui.shopModeNote.classList.add(state.providerReady ? "is-live" : "is-safe");
+  ui.draftButton.querySelector(".button-label").textContent = "Find matches";
 }
 
 function showToast(message, { tone = "default", action = null, sticky = false } = {}) {
@@ -240,7 +290,7 @@ function itemMarkup(item) {
     ? `<div class="item-flags" role="status">${item.flags.map((flag) => `<span>Review: ${escapeHtml(flag)}</span>`).join("")}</div>`
     : "";
   const tools = state.autoAdd
-    ? '<span class="selection-status">Automatically selected</span>'
+    ? '<span class="selection-status">Selected and added automatically</span>'
     : `<form class="query-editor" data-action="research">
         <label for="query-${escapeHtml(item.planned.id)}">Search query for ${escapeHtml(providerQuery)}</label>
         <input class="query-input" id="query-${escapeHtml(item.planned.id)}" value="${escapeHtml(providerQuery)}" />
@@ -248,7 +298,7 @@ function itemMarkup(item) {
       </form>
       <button class="text-button" type="button" data-action="remove">${item.removed ? "Restore" : "Remove"}</button>`;
   const quantity = state.autoAdd
-    ? `<p class="auto-quantity">${escapeHtml(item.units_to_add)} pack${item.units_to_add === 1 ? "" : "s"} selected for automatic Add</p>`
+    ? `<p class="auto-quantity">${escapeHtml(item.units_to_add)} pack${item.units_to_add === 1 ? "" : "s"} added to ${escapeHtml(state.providerName)}</p>`
     : `<div class="quantity-control">
         <span>Packs to add</span>
         <button class="qty-button" type="button" data-action="decrement" aria-label="Decrease packs">−</button>
@@ -306,6 +356,24 @@ function renderDraft() {
   const warnings = (state.draft.flags ?? [])
     .map((flag) => `<div class="flag"><span aria-hidden="true">!</span><span>${escapeHtml(flag)}</span></div>`);
   ui.cartFlags.innerHTML = [...notices, ...addMessages, ...addErrors, ...warnings].join("");
+  ui.totalBlock.querySelector(":scope > span").textContent = state.autoAdd
+    ? "Products total"
+    : state.cartMutationsAllowed ? "Selected total" : "Preview total";
+  if (state.autoAdd) {
+    const failed = (state.draft.auto_add_errors ?? []).length;
+    ui.reviewTitle.textContent = failed
+      ? "Some products could not be added"
+      : `${state.providerName} cart updated`;
+    ui.reviewSummary.textContent = failed
+      ? "Review the messages and selected products below. Checkout and payment were not opened."
+      : "Review what was added below. Checkout and payment were not opened.";
+  } else if (!state.cartMutationsAllowed) {
+    ui.reviewTitle.textContent = `Preview the ${state.providerName} matches`;
+    ui.reviewSummary.textContent = "Check each product and pack count. Preview mode cannot change the cart.";
+  } else {
+    ui.reviewTitle.textContent = `Review your ${state.providerName} matches`;
+    ui.reviewSummary.textContent = "Check each product and pack count, then add the selected items from the bar below.";
+  }
   updateSummary();
 }
 
@@ -345,7 +413,7 @@ function transcriptionRowMarkup(item) {
         </select>
       </div>
       ${item.crop_box?.length === 4 ? `<canvas class="transcription-crop" data-crop="${item.crop_box.map(Number).join(",")}" aria-label="Handwriting crop for ${escapeHtml(item.search_term)}"></canvas>` : ""}
-      <p class="transcription-source">Read from “${escapeHtml(item.raw_text || item.search_term)}” · semantic confidence ${Math.round((item.confidence ?? 0) * 100)}%</p>
+      <p class="transcription-source">Read from “${escapeHtml(item.raw_text || item.search_term)}” · reading confidence ${Math.round((item.confidence ?? 0) * 100)}%</p>
       ${alternatives.length ? `<p class="transcription-alternatives">Other readings: ${alternatives.map((alternative) => `<span>“${escapeHtml(alternative)}”</span>`).join(" · ")}</p>` : ""}
       ${warning ? `<p class="transcription-warning">${escapeHtml(notes || "This line needs confirmation before search.")}</p>` : ""}
     </article>`;
@@ -389,7 +457,7 @@ function renderTranscription() {
     && ui.image.files[0]
   );
   ui.continueReviewed.querySelector(".button-label").textContent =
-    state.pendingAction === "compare" ? "Compare the reviewed list" : "Search the reviewed list";
+    state.pendingAction === "compare" ? "Compare these items" : `Search ${state.providerName} for these items`;
   ui.transcription.hidden = false;
   ui.progress.hidden = true;
   ui.transcription.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -424,7 +492,7 @@ async function previewRequest(action, { useCloud = false } = {}) {
   const hasText = Boolean(ui.text.value.trim());
   const hasImage = Boolean(ui.image.files[0]);
   if (!hasText && !hasImage) {
-    showRequestError("Add a photo or type the grocery list first.");
+    showRequestError("Add a photo or type at least one grocery item.");
     ui.text.focus();
     return;
   }
@@ -478,6 +546,25 @@ async function previewRequest(action, { useCloud = false } = {}) {
     showToast(error.message, { tone: "error", sticky: true });
     window.setTimeout(() => setButtonState(button), 1800);
   }
+}
+
+function friendlyComparisonReason(reason) {
+  const cleanReason = reason.trim().replace(/\.+$/, "");
+  const unverified = cleanReason.match(/^(.+?) could not verify the quantity for:\s*(.+)$/i);
+  if (unverified) {
+    return `No size was written for ${unverified[2]}. The ${unverified[1]} total uses the selected packs shown below.`;
+  }
+  const short = cleanReason.match(/^(.+?) supplies short packs for:\s*(.+)$/i);
+  if (short) {
+    return `The selected ${short[1]} packs may not supply the full requested amount for ${short[2]}.`;
+  }
+  const missing = cleanReason.match(/^(.+?) is missing:\s*(.+)$/i);
+  if (missing) {
+    return `${missing[1]} did not find comparable products for ${missing[2]}. Its partial total is not ranked as the best option.`;
+  }
+  return cleanReason
+    .replaceAll("Verified-mode", "Exact-total")
+    .replaceAll("verified-mode", "exact-total");
 }
 
 function comparisonOutcomeMarkup(outcome, winner) {
@@ -563,20 +650,21 @@ function comparisonOutcomeMarkup(outcome, winner) {
     <li><span>${escapeHtml(fee.label)}</span><span>${money.format(fee.amount)}</span></li>`
   ).join("");
   const warnings = [
-    ...(outcome.missing_items ?? []).map((item) => `Missing: ${item}`),
-    ...(outcome.partial_items ?? []).map((item) => `Short quantity: ${item}`),
-    ...(outcome.unverified_items ?? []).map((item) => `Quantity not verified: ${item}`),
+    ...(outcome.missing_items ?? []).map((item) => `No matching product was found for ${item}.`),
+    ...(outcome.partial_items ?? []).map((item) => `The selected pack may not supply the full requested amount for ${item}.`),
+    ...(outcome.unverified_items ?? []).map((item) => `No size was written for ${item}, so the selected pack is an estimate.`),
   ];
+  const selectedCount = summary.lines.length;
   const coverage = warnings.length
-    ? `${outcome.matched_items} matched · ${warnings.length} needs attention`
-    : `${outcome.matched_items} matched · full coverage`;
+    ? `${selectedCount} product${selectedCount === 1 ? "" : "s"} selected · ${warnings.length} detail${warnings.length === 1 ? "" : "s"} to check`
+    : `${selectedCount} product${selectedCount === 1 ? "" : "s"} selected · complete list`;
   return `
     <article class="platform-outcome${outcome.provider === winner ? " is-winner" : ""}">
       <header>
-        <span class="comparison-status">${outcome.provider === winner ? "Recommended" : "Compared"}</span>
+        <span class="comparison-status">${outcome.provider === winner ? "Lowest total" : "Compared"}</span>
         <h3>${escapeHtml(outcome.display_name)}</h3>
         <span class="comparison-coverage">${escapeHtml(coverage)}</span>
-        ${summary.estimated ? '<span class="comparison-estimate">Estimated fees</span>' : '<span class="comparison-status">Verified cart total</span>'}
+        ${summary.estimated ? '<span class="comparison-estimate">Estimated total</span>' : '<span class="comparison-status">Exact cart total</span>'}
       </header>
       <ul class="comparison-lines">${itemLines + unmatchedLines || "<li><span>No matched products</span><span>—</span></li>"}</ul>
       ${warnings.length ? `<div class="coverage-warnings">${warnings.map((warning) => `<p>${escapeHtml(warning)}</p>`).join("")}</div>` : ""}
@@ -596,14 +684,17 @@ function renderComparison(report) {
   const winner = report.winner;
   const winnerOutcome = report.platforms.find((outcome) => outcome.provider === winner);
   ui.comparisonWinner.innerHTML = winnerOutcome
-    ? `<span>${report.estimated ? "Estimated best option" : "Verified best option"}</span><strong>${escapeHtml(winnerOutcome.display_name)}</strong><span>${money.format(winnerOutcome.summary.total)}</span>`
+    ? `<span>${report.estimated ? "Lowest estimated total" : "Lowest exact total"}</span><strong>${escapeHtml(winnerOutcome.display_name)}</strong><span>${money.format(winnerOutcome.summary.total)}</span>`
     : "";
   ui.comparisonSummary.textContent = report.estimated
-    ? "Estimated totals use product prices plus clearly labelled fee estimates. No cart was changed."
-    : "Totals were read from provider carts and checked against their fee breakdowns.";
+    ? "These totals combine live product prices with estimated fees. No cart was changed."
+    : "These totals were read from the shopping-app carts, including the fees shown there.";
+  ui.comparisonEditHelp.hidden = !report.estimated;
   ui.comparisonReasons.innerHTML = (report.reasons ?? [])
-    .map((reason) => `<p>${escapeHtml(reason)}</p>`)
+    .map((reason) => `<p>${escapeHtml(friendlyComparisonReason(reason))}</p>`)
     .join("");
+  ui.comparisonReasonDetails.hidden = !(report.reasons ?? []).length;
+  ui.comparisonReasonDetails.open = false;
   ui.comparisonGrid.innerHTML = report.platforms
     .map((outcome) => comparisonOutcomeMarkup(outcome, winner))
     .join("");
@@ -632,7 +723,6 @@ async function overrideComparisonSelection(providerId, itemId, productId, units)
     if (!response.ok) throw new Error(payload.detail || "Comparison choice failed.");
     state.comparisonProposal = payload;
     renderComparison(payload.report);
-    showToast("Comparison updated. Verified-mode confirmation must be checked again.");
   } catch (error) {
     showToast(error.message, { tone: "error", sticky: true });
   }
@@ -642,7 +732,7 @@ async function runComparison(plan) {
   const providerIds = selectedComparisonProviders();
   if (!providerIds.length) {
     showToast("Choose at least one app to compare.", { tone: "error" });
-    return;
+    return false;
   }
 
   showRequestError("");
@@ -692,17 +782,17 @@ async function verifyComparisonReadiness() {
     );
     const preflight = await preflightResponse.json();
     if (!preflightResponse.ok) {
-      throw new Error(preflight.detail || "Verified-mode preflight failed.");
+      throw new Error(preflight.detail || "The exact-total check could not start.");
     }
     if (!preflight.can_continue || !preflight.confirmation_token) {
       const details = preflight.platforms
         .filter((platform) => !platform.eligible)
         .map((platform) => `${platform.display_name}: ${platform.message}`)
         .join(" ");
-      throw new Error(details || "Verified comparison is not ready.");
+      throw new Error(details || "The exact-total check is not ready.");
     }
     const confirmed = window.confirm(
-      "Verified comparison will temporarily add the reviewed items to every eligible cart. Carts must be empty. Checkout remains disabled. Continue?",
+      "To read exact fees, this will temporarily add the reviewed products to every eligible cart. Each cart must be empty. Checkout and payment will not be opened. Continue?",
     );
     if (!confirmed) return;
 
@@ -800,23 +890,12 @@ async function researchItem(form) {
   }
 }
 
-function burstAt(element) {
-  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-  const rect = element.getBoundingClientRect();
-  const burst = document.createElement("span");
-  burst.className = "star-burst";
-  burst.style.left = `${rect.left + rect.width / 2}px`;
-  burst.style.top = `${rect.top}px`;
-  document.body.append(burst);
-  window.setTimeout(() => burst.remove(), 600);
-}
-
 function openSummary(payload) {
   ui.summaryCopy.textContent = payload.dry_run
-    ? `Dry run complete. ${payload.succeeded} selection${payload.succeeded === 1 ? "" : "s"} passed without clicking Add.`
-    : `${payload.succeeded} item${payload.succeeded === 1 ? "" : "s"} added; ${payload.failed} failed.`;
+    ? `${payload.succeeded} selection${payload.succeeded === 1 ? "" : "s"} checked. Preview mode did not click Add.`
+    : `${payload.succeeded} item${payload.succeeded === 1 ? "" : "s"} added to ${state.providerName}; ${payload.failed} failed. Checkout was not opened.`;
   ui.summaryList.innerHTML = payload.results.map((result) =>
-    `<li class="${result.success ? "" : "is-error"}"><strong>${result.success ? "Ready" : "Failed"}</strong> · ${escapeHtml(result.message)}</li>`,
+    `<li class="${result.success ? "" : "is-error"}"><strong>${result.success ? (payload.dry_run ? "Checked" : "Added") : "Failed"}</strong> · ${escapeHtml(result.message)}</li>`,
   ).join("");
   document.querySelector("#app-shell").inert = true;
   ui.dialog.showModal();
@@ -849,7 +928,6 @@ async function confirmDraft() {
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || "Cart assembly failed.");
     setButtonState(ui.confirmButton, "success");
-    burstAt(ui.confirmButton);
     openSummary(payload);
     window.setTimeout(() => setButtonState(ui.confirmButton), 1200);
   } catch (error) {
@@ -1067,11 +1145,16 @@ ui.refreshAddresses.addEventListener("click", async () => {
 
 function clearDraftForProviderChange() {
   state.draft = null;
+  state.comparisonProposal = null;
+  state.comparisonOperation = null;
+  state.providerReady = false;
+  state.providerStatusMessage = "";
   state.lastTotal = 0;
   ui.progress.hidden = true;
   ui.review.hidden = true;
   ui.transcription.hidden = true;
   ui.confirmBar.hidden = true;
+  ui.comparison.hidden = true;
   ui.groups.replaceChildren();
   ui.cartFlags.replaceChildren();
 }
@@ -1170,9 +1253,9 @@ function applyHealth(health) {
     `Retry uncertain lines with ${state.cloudRetryProvider === "nvidia" ? "NVIDIA" : "cloud"} vision`;
   ui.dishCapability.textContent = health.model_backend === "local"
     ? state.recognitionPolicy === "autonomous_safe"
-      ? "Autonomous local + catalogue recognition"
-      : "Offline grocery parsing · dish expansion needs hosted planning"
-    : "Dish-to-ingredient expansion";
+      ? "Reads lists on this device and checks the product catalogue"
+      : "Reads grocery lists offline · dish names need online planning"
+    : "Can turn dish names into ingredient lists";
 
   if (state.availableProviders.length) {
     ui.providerSelect.innerHTML = state.availableProviders.map((provider) =>
@@ -1183,24 +1266,25 @@ function applyHealth(health) {
   ui.providerSelect.disabled = state.demoMode;
 
   ui.modeBadge.textContent = health.demo_mode
-    ? "SAFE DEMO · PROVIDERS OFF"
+    ? "Demo · carts unchanged"
     : !state.cartMutationsAllowed
-      ? `${state.providerName.toUpperCase()} SAFE TEST · CART WRITES OFF`
+      ? "Preview · cart unchanged"
     : health.safety_lock
-      ? "SAFETY LOCK · CART CLICKS OFF"
+      ? "Safety lock · cart unchanged"
       : health.dry_run
-      ? "DRY RUN · ADD CLICKS OFF"
+      ? "Dry run · cart unchanged"
       : health.auto_add_to_cart
-      ? `${state.providerName.toUpperCase()} AUTO ADD · CHECKOUT OFF`
-      : "LIVE MODE · REVIEW CAREFULLY";
+      ? "Auto-add · checkout off"
+      : "Review first · checkout off";
   ui.confirmMode.textContent = state.autoAdd
-    ? `The best match is added automatically to ${state.providerName}. Checkout remains disabled.`
+    ? `The products above were added automatically to ${state.providerName}. Checkout and payment stay manual.`
     : !state.cartMutationsAllowed
-    ? "Safe test: cannot add, checkout, pay, or place an order."
-    : `Adds to ${state.providerName} after this confirmation.`;
+    ? "Preview mode cannot add products, open checkout, pay, or place an order."
+    : `This button adds the selected products to ${state.providerName}. It does not open checkout.`;
   ui.confirmButton.querySelector(".button-label").textContent =
     state.cartMutationsAllowed ? "Add selected items" : "Run safe test";
-  if (!health.model_configured) ui.modeBadge.textContent = "HF TOKEN NEEDED";
+  if (!health.model_configured) ui.modeBadge.textContent = "List planning is unavailable";
+  updateActionCopy();
 }
 
 async function refreshApplicationState(refreshStatus = false) {
@@ -1212,6 +1296,7 @@ async function refreshApplicationState(refreshStatus = false) {
     ui.loginButton.textContent = "Providers disabled in demo";
     ui.loginButton.disabled = true;
     ui.draftButton.disabled = false;
+    updateActionCopy();
     return;
   }
   await loadProviderStatus(refreshStatus);
@@ -1233,15 +1318,19 @@ async function initialise() {
     // backend's cached connection flags do not.
     await refreshApplicationState(true);
   } catch {
-    ui.modeBadge.textContent = "BACKEND OFFLINE";
+    ui.modeBadge.textContent = "App service is offline";
+    ui.shopModeNote.textContent = "The local app service is not responding. Restart it, then reload this page.";
+    ui.shopModeNote.classList.add("is-safe");
   }
 }
 
 function applyProviderStatus(status) {
   state.providerConnected = status.connected;
+  state.providerStatusMessage = status.message || "";
   state.providerName = status.display_name || state.providerName;
+  const shortProviderName = state.provider === "instamart" ? "Instamart" : state.providerName;
   ui.loginButton.textContent = status.connected
-    ? `${state.providerName} connected`
+    ? `${shortProviderName} connected`
     : `Connect ${state.providerName}`;
   setButtonState(ui.loginButton, status.connected ? "success" : "default");
   ui.loginButton.disabled = status.connected;
@@ -1266,8 +1355,7 @@ function applyProviderStatus(status) {
   // Local transcription review works without a provider connection. The
   // reviewed-list action checks readiness immediately before any provider call.
   ui.draftButton.disabled = false;
-  if (status.message && !ready) showRequestError(status.message);
-  else if (state.providerConnected) showRequestError("");
+  updateActionCopy();
 }
 
 async function loadProviderStatus(refresh = false) {

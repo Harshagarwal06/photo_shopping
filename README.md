@@ -15,8 +15,8 @@ Zepto use isolated local browser profiles.
   editable brands/quantities, and uncertain lines excluded by default.
 - Semantic OCR confidence, duplicate/page-number filtering, and a fail-closed product
   relevance gate so malformed handwriting cannot silently select an unrelated item.
-- An explicit optional cloud retry that sends only uncertain line crops, never the
-  complete photograph.
+- An optional Groq Qwen vision retry that sends only isolated uncertain line strips,
+  never the complete photograph.
 - A common provider interface with Blinkit and Instamart active side by side.
 - Official Instamart OAuth 2.1 with PKCE and dynamic client registration.
 - OAuth tokens stored in the macOS Keychain, never in the browser or project files.
@@ -43,19 +43,18 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-For hosted request parsing, add a Hugging Face or NVIDIA API key to `.env`. NVIDIA's
-hosted vision model is the preferred second opinion for uncertain handwriting:
+For the fast hosted handwriting second opinion, add a Groq API key to `.env`:
 
 ```dotenv
 MODEL_BACKEND=local
-NVIDIA_API_KEY=nvapi_your_key_here
-NVIDIA_MODEL_ID=nvidia/nemotron-3-nano-omni-30b-a3b-reasoning
-CLOUD_MODEL_BACKEND=nvidia
+GROQ_API_KEY=gsk_your_key_here
+GROQ_MODEL_ID=qwen/qwen3.6-27b
+CLOUD_MODEL_BACKEND=groq
 RECOGNITION_POLICY=autonomous_safe
 ```
 
-Typed grocery requests can fall back to the local parser when hosted inference is
-unavailable.
+Hugging Face and NVIDIA remain supported fallbacks. Typed grocery requests can fall
+back to the local parser when hosted inference is unavailable.
 The local parser handles common English, Hindi, and Hinglish grocery terms, quantities,
 budgets, brands, and price preferences; general dish-to-ingredient expansion requires
 hosted planning.
@@ -97,10 +96,9 @@ the local app after its OAuth flow; Blinkit keeps the existing saved browser ses
 For a photographed request, the app reads the image locally first and pauses before any
 provider search. Review the recognized product, brand, quantity, and unit. Low-confidence
 lines are unchecked, so they cannot be searched accidentally. Editing a line checks it
-for inclusion. If a hosted-model key is configured, **Retry uncertain lines with NVIDIA
-vision** sends only those cropped lines after the button is selected; failure leaves the
-local review unchanged. Successful cloud suggestions remain unchecked until you confirm
-them manually.
+for inclusion. If a hosted-model key is configured, the retry action sends only those
+isolated line strips; failure leaves the local review unchanged. In review mode,
+successful cloud suggestions remain unchecked until you confirm them manually.
 
 With `RECOGNITION_POLICY=autonomous_safe`, the editable transcription checkpoint is
 replaced by an automatic decision stage. Local Vision, an independent hosted suggestion,

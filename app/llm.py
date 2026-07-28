@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import time
 from typing import Any
 
 import httpx
@@ -187,3 +188,85 @@ class NvidiaModelClient:
         except (httpx.HTTPError, ValueError, KeyError, IndexError) as exc:
             detail = str(exc).strip() or exc.__class__.__name__
             raise ModelBackendError(f"NVIDIA inference failed: {detail}") from exc
+
+
+class GroqModelClient:
+    """OpenAI-compatible vision client for Groq-hosted Qwen models."""
+
+    def __init__(self, settings: Settings):
+        if settings.model_backend != "groq":
+            raise ModelBackendError(f"Unsupported MODEL_BACKEND: {settings.model_backend}")
+        if not settings.groq_api_key:
+            raise ModelBackendError(
+                "GROQ_API_KEY is missing. Add it to .env before using Groq vision."
+            )
+        self._api_key = settings.groq_api_key
+        self._url = settings.groq_api_base_url.rstrip("/") + "/chat/completions"
+
+    def complete_json(
+        self,
+        *,
+        model: str,
+        system: str,
+        prompt: str,
+        image_bytes: bytes | None = None,
+        image_media_type: str = "image/jpeg",
+        max_tokens: int = 1800,
+    ) -> dict[str, Any]:
+        content: str | list[dict[str, Any]] = prompt
+        if image_bytes:
+            encoded = base64.b64encode(image_bytes).decode("ascii")
+            content = [
+                {"type": "text", "text": prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{image_media_type};base64,{encoded}"},
+                },
+            ]
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": content},
+            ],
+            "response_format": {"type": "json_object"},
+            "reasoning_effort": "none",
+            "max_tokens": max_tokens,
+            "stream": False,
+            "temperature": 0.1,
+            "top_p": 1,
+        }
+        try:
+            for attempt in range(2):
+                response = httpx.post(
+                    self._url,
+                    headers={
+                        "Authorization": f"Bearer {self._api_key}",
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                    timeout=120,
+                )
+                if response.status_code not in {502, 503, 504} or attempt == 1:
+                    break
+                time.sleep(1)
+            if response.status_code == 401:
+                raise ModelBackendError("Groq rejected the API key.")
+            if response.status_code == 403:
+                raise ModelBackendError("The Groq API key cannot invoke this model.")
+            if response.status_code == 429:
+                raise ModelBackendError(
+                    "Groq's free endpoint is rate-limited; try again after its retry window."
+                )
+            response.raise_for_status()
+            body = response.json()
+            raw = body.get("choices", [{}])[0].get("message", {}).get("content")
+            if not isinstance(raw, str):
+                raise ModelBackendError("The Groq model returned an empty response.")
+            return parse_json_object(raw)
+        except ModelBackendError:
+            raise
+        except (httpx.HTTPError, ValueError, KeyError, IndexError) as exc:
+            detail = str(exc).strip() or exc.__class__.__name__
+            raise ModelBackendError(f"Groq inference failed: {detail}") from exc

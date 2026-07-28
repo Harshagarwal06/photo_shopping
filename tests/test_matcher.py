@@ -204,6 +204,64 @@ def test_dietary_and_cut_modifiers_cannot_be_discarded_by_partial_overlap():
     ).product_id == "boneless"
 
 
+def test_generic_coke_does_not_become_diet_or_zero_sugar_coke():
+    item = PlannedItem(search_term="Coke Can")
+    candidates = [
+        Product(
+            id="multipack",
+            name="Coca-Cola Original Taste Soft Drink - Pack of 8",
+            pack_size="8 x 250 ml",
+            price=160,
+            handle="multipack",
+        ),
+        Product(
+            id="regular",
+            name="Coca-Cola Soft Drink",
+            pack_size="300 ml",
+            price=40,
+            handle="regular",
+        ),
+        Product(
+            id="diet",
+            name="Diet Coke Diets & Lights",
+            pack_size="330 ml",
+            price=50,
+            handle="diet",
+        ),
+        Product(
+            id="zero",
+            name="Coca-Cola Zero Sugar Soft Drink",
+            pack_size="750 ml",
+            price=38,
+            handle="zero",
+        ),
+    ]
+
+    assert _fallback_match(item, candidates).product_id == "regular"
+
+
+def test_bare_coffee_does_not_become_coffee_flavoured_milk():
+    item = PlannedItem(search_term="Coffee")
+    candidates = [
+        Product(
+            id="milk",
+            name="Amul Kool Cafe Milk 'n' Coffee Flavoured Milk",
+            pack_size="200 ml",
+            price=30,
+            handle="milk",
+        ),
+        Product(
+            id="coffee",
+            name="Nescafe Classic - 100% Pure Instant Coffee Powder - 24 g",
+            pack_size="24 g",
+            price=124,
+            handle="coffee",
+        ),
+    ]
+
+    assert _fallback_match(item, candidates).product_id == "coffee"
+
+
 def test_rin_soap_matches_its_detergent_bar_without_weakening_generic_soap():
     rin = PlannedItem(search_term="soap", context="Rin")
     candidates = [

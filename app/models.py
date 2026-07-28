@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, computed_field, field_validator
 
 
 PROVIDER_QUERY_BRANDS = (
-    "aashirvaad", "amul", "britannia", "cadbury", "daawat", "fortune",
+    "aashirvaad", "amul", "britannia", "cadbury", "colgate", "daawat", "fortune",
     "havmor", "kelloggs", "kitkat", "knorr", "kurkure", "maggi", "mother dairy",
     "oreo", "pintola", "real", "rin", "tata",
 )

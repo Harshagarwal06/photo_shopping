@@ -215,6 +215,16 @@ TERM_ALIASES = {
     "adrak": "ginger",
     "lehsun": "garlic",
     "lahsun": "garlic",
+    "mung": "moong",
+    "achar": "pickle",
+    "achaar": "pickle",
+    "aam achar": "mango pickle",
+    "aam achaar": "mango pickle",
+    "aam pickle": "mango pickle",
+    "aam ka achar": "mango pickle",
+    "aam ka achaar": "mango pickle",
+    "yellow chana bhuna": "roasted chana",
+    "colgate paste": "Colgate toothpaste",
     # spices and staples of the masala dabba
     "haldi": "turmeric",
     "jeera": "cumin",
@@ -432,25 +442,27 @@ def _budget_amount(match: re.Match[str] | None) -> float | None:
 # against "pani", which would order water.
 RETAIL_TERMS = frozenset(
     {
-        "almonds", "atta", "ball", "basmati", "beans", "besan", "bhindi",
-        "blue", "bodywash", "bread", "breast", "brown", "butter", "carrot", "chai", "chana",
+        "aam", "achar", "almonds", "atta", "ball", "basmati", "beans", "besan", "bhindi",
+        "bhuna",
+        "black", "blue", "bodywash", "bottle", "bottles", "bread", "breast",
+        "brown", "butter", "can", "cans", "carrot", "chai", "chana",
         "cheese", "chicken", "chocolate", "cocoa", "coffee", "cone", "cornflakes",
-        "cream", "curd",
-        "dal", "eggs", "enamel", "flour", "fruit", "gel", "ghee", "gobi", "ice",
+        "coke", "cream", "curd",
+        "dal", "eggs", "enamel", "flour", "fruit", "garam", "gel", "ghee", "gobi", "ice",
         "icecream", "jaggery",
         "juice", "kaju", "kitkat", "loaf",
-        "maggi", "maida", "masala", "methi", "milk", "mixed", "moong",
+        "maggi", "maida", "mango", "masala", "methi", "milk", "mixed", "moong",
         "murmura", "nail", "noodles", "oil", "onion", "oregano", "oreo", "paint",
         "paneer", "pasta", "patti", "peanut", "pen", "pencil", "penne", "poha",
-        "polish", "potato", "powder",
-        "puffcorn", "rajma", "rava", "rice", "salt", "sandwich", "soap",
+        "pickle", "polish", "potato", "powder",
+        "puffcorn", "rajma", "rava", "rice", "roasted", "salt", "sandwich", "soap",
         "shower", "soup", "sooji", "sugar", "suji", "tea", "tomato", "toor",
-        "turmeric", "upma", "water",
+        "toothpaste", "turmeric", "upma", "water", "yellow",
     }
 )
 KNOWN_BRANDS = frozenset(
     {
-        "amul", "aashirvaad", "britannia", "cadbury", "daawat", "fortune",
+        "amul", "aashirvaad", "britannia", "cadbury", "colgate", "daawat", "fortune",
         "havmor", "kelloggs", "knorr", "kurkure", "maggi", "mother dairy", "oreo",
         "pintola", "real", "rin", "tata",
     }
@@ -726,7 +738,7 @@ def _parse_quantity(raw: str) -> float | None:
 
 def _clean_name(name: str) -> str:
     cleaned = re.sub(r"\b(?:please|get|buy|need|add)\b", " ", name, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .:-")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .,:-")
     # The whole phrase first, so multi-word entries such as "chai patti" resolve
     # as one term rather than word by word.
     whole = TERM_ALIASES.get(cleaned.lower())
@@ -977,6 +989,73 @@ def _repair_adjacent_row_spills(lines: list[RecognizedLine]) -> list[RecognizedL
     return repaired
 
 
+def _remove_merged_ocr_boxes(lines: list[RecognizedLine]) -> list[RecognizedLine]:
+    """Drop a tall cross-scale box that redundantly spans two real rows."""
+    if len(lines) < 3:
+        return lines
+    kept: list[RecognizedLine] = []
+    for candidate in lines:
+        if not candidate.y or candidate.height < 0.25:
+            kept.append(candidate)
+            continue
+        lower = candidate.y - candidate.height / 2
+        upper = candidate.y + candidate.height / 2
+        contained = [
+            other
+            for other in lines
+            if other is not candidate
+            and other.y
+            and other.height > 0
+            and lower <= other.y <= upper
+            and other.height <= candidate.height * 0.7
+        ]
+        centers = sorted({round(other.y, 3) for other in contained})
+        spans_multiple_rows = (
+            len(centers) >= 2 and centers[-1] - centers[0] >= 0.055
+        )
+        if spans_multiple_rows:
+            continue
+        kept.append(candidate)
+    return kept
+
+
+def _repair_arrow_bullets(lines: list[RecognizedLine]) -> list[RecognizedLine]:
+    """Prefer an arrow alternative when its strokes were mistaken for a count."""
+    for line in lines:
+        if line.x > 0.02:
+            continue
+        numbered = re.match(r"^\s*\d+\s+(?P<body>.+)$", line.text)
+        if numbered is None:
+            continue
+        numbered_body = numbered.group("body").strip(" .")
+        replacement = next(
+            (
+                alternative
+                for alternative in line.alternatives
+                if re.match(r"^\s*(?:→|->|⇒|⟶)\s*", alternative)
+                and difflib.SequenceMatcher(
+                    None,
+                    numbered_body.casefold(),
+                    re.sub(
+                        r"^\s*(?:→|->|⇒|⟶)\s*",
+                        "",
+                        alternative,
+                    ).strip(" .").casefold(),
+                ).ratio()
+                >= 0.9
+            ),
+            None,
+        )
+        if replacement is None:
+            continue
+        original = line.text
+        line.text = replacement
+        line.alternatives = list(
+            dict.fromkeys([original, *line.alternatives])
+        )[:8]
+    return lines
+
+
 def plan_locally(
     *,
     text: str,
@@ -984,6 +1063,8 @@ def plan_locally(
     image_media_type: str,
 ) -> CartPlan:
     photo_lines = recognize_details(image_bytes, image_media_type) if image_bytes else []
+    photo_lines = _remove_merged_ocr_boxes(photo_lines)
+    photo_lines = _repair_arrow_bullets(photo_lines)
     photo_lines = _repair_bare_list_ordinals(photo_lines)
     photo_lines = _repair_adjacent_row_spills(photo_lines)
     readable = [line for line in photo_lines if line.confidence >= MIN_LINE_CONFIDENCE]

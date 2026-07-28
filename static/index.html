@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Photo Shopping</title>
     <meta name="description" content="Turn a grocery photo or typed request into a ranked instant-grocery cart." />
-    <link rel="stylesheet" href="/styles.css?v=comparison-equivalence-1" />
-    <script src="/app.js?v=comparison-equivalence-1" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=guided-workflow-10" />
+    <script src="/app.js?v=guided-workflow-10" defer></script>
   </head>
   <body>
     <header class="nav-slab">
@@ -16,9 +16,9 @@
         <span class="brand-short" aria-hidden="true">SHOP</span>
       </a>
       <div class="nav-meta">
-        <span class="mode-badge" id="mode-badge">Checking setup…</span>
+        <span class="mode-badge" id="mode-badge" role="status" aria-live="polite">Checking setup…</span>
         <label class="provider-picker" for="provider-select">
-          <span>Shop with</span>
+          <span>Shopping app</span>
           <select id="provider-select" aria-label="Grocery provider">
             <option value="blinkit">Blinkit</option>
             <option value="instamart">Swiggy Instamart</option>
@@ -45,66 +45,102 @@
     <main id="app-shell">
       <section class="request-shell" id="request" aria-labelledby="request-title">
         <div class="request-copy">
-          <h1 id="request-title">A grocery list, ready to question.</h1>
+          <h1 id="request-title">Turn your list into the right cart.</h1>
           <p>
-            Add a handwritten photo, a typed request, or both. You’ll review every match,
-            quantity, and rupee before anything reaches your grocery cart.
+            Type a grocery list, upload a photo, or use both. Then shop on one app
+            or compare prices without changing any cart.
           </p>
-          <ul class="promise-list" aria-label="What the assistant handles">
-            <li>English, Hindi, and Hinglish</li>
-            <li id="dish-capability">Dish-to-ingredient expansion with hosted planning</li>
-            <li>Budget and pack-size checks</li>
-          </ul>
+          <ol class="journey-list" aria-label="How Photo Shopping works">
+            <li>
+              <span>1</span>
+              <div><strong>Add your list</strong><small>Photo, typed text, or both.</small></div>
+            </li>
+            <li>
+              <span>2</span>
+              <div><strong>Choose a path</strong><small>Shop on one app or compare several.</small></div>
+            </li>
+            <li>
+              <span>3</span>
+              <div><strong>Check the products</strong><small>Review matches, packs, and totals.</small></div>
+            </li>
+          </ol>
+          <p class="capability-note">
+            Reads English, Hindi, and Hinglish. <span id="dish-capability">Dish expansion is available with hosted planning</span>.
+            Checkout always stays in the grocery app.
+          </p>
         </div>
 
         <form class="request-form" id="request-form" novalidate>
+          <header class="form-step-head">
+            <div>
+              <h2>Add your shopping list</h2>
+              <p>Use either field, or use both when the photo needs extra detail.</p>
+            </div>
+          </header>
           <div class="field">
-            <label for="request-text">Grocery request</label>
+            <label for="request-text">Type your list <span class="optional-label">(optional)</span></label>
             <textarea
               id="request-text"
               name="text"
-              rows="5"
-              placeholder="paneer butter masala for 4, plus dish soap, under ₹800 total"
+              rows="4"
+              placeholder="Example: 2 L milk, black pen, cheapest coffee, under ₹800"
               aria-describedby="request-help request-error"
             ></textarea>
-            <p class="field-help" id="request-help">Include quantities, budget, or words like “cheapest” when they matter.</p>
+            <p class="field-help" id="request-help">Put each item on a new line. Add sizes, brands, or a budget.</p>
             <p class="field-error" id="request-error" role="alert" hidden></p>
           </div>
 
           <div class="upload-field">
-            <span class="field-label">List photo</span>
+            <span class="field-label">Upload a list photo <span class="optional-label">(optional)</span></span>
             <label class="upload-box" for="request-image" id="upload-box">
               <input id="request-image" name="image" type="file" accept="image/*" />
               <svg class="line-icon" aria-hidden="true" viewBox="0 0 24 24">
                 <path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14v5h14v-5" />
               </svg>
-              <span class="upload-copy"><strong>Choose a photo</strong><small>JPG, PNG, HEIC · up to 12 MB</small></span>
+              <span class="upload-copy"><strong>Choose a clear photo</strong><small>JPG, PNG, HEIC · up to 12 MB</small></span>
               <span class="file-name" id="file-name">No photo selected</span>
             </label>
           </div>
 
-          <fieldset class="comparison-options">
-            <legend>Compare across apps</legend>
-            <p>Estimated comparison never changes a cart.</p>
-            <div class="platform-checks" id="comparison-providers">
-              <label><input type="checkbox" value="blinkit" checked /> Blinkit</label>
-              <label><input type="checkbox" value="instamart" checked /> Swiggy Instamart</label>
-              <label><input type="checkbox" value="zepto" checked /> Zepto</label>
+          <header class="form-step-head form-step-head--choice">
+            <div>
+              <h2>Choose what happens next</h2>
+              <p>The two options below behave differently. Pick the one that matches your goal.</p>
             </div>
-          </fieldset>
+          </header>
 
-          <div class="form-actions">
-            <p>Nothing is added until you confirm the finished draft.</p>
-            <div class="form-action-buttons">
+          <div class="action-paths">
+            <section class="action-path" aria-labelledby="shop-path-title">
+              <div class="action-path-copy">
+                <h3 id="shop-path-title">Shop on one app</h3>
+                <p id="shop-path-help">Find the best product for every item on your selected shopping app.</p>
+              </div>
+              <p class="action-mode-note" id="shop-mode-note" role="status">Checking whether this mode can change your cart…</p>
               <button class="btn btn--soft" id="draft-button" type="submit">
-                <span class="button-label">Build one cart</span>
+                <span class="button-label">Find products</span>
                 <span class="spinner" aria-hidden="true"></span>
               </button>
+            </section>
+
+            <section class="action-path action-path--compare" aria-labelledby="compare-path-title">
+              <div class="action-path-copy">
+                <h3 id="compare-path-title">Compare apps</h3>
+                <p>Estimate the same list on every selected app. This never changes a cart.</p>
+              </div>
+              <fieldset class="comparison-options">
+                <legend>Apps to compare</legend>
+                <p>Unavailable apps are skipped; the others still compare.</p>
+                <div class="platform-checks" id="comparison-providers">
+                  <label><input type="checkbox" value="blinkit" checked /> Blinkit</label>
+                  <label><input type="checkbox" value="instamart" checked /> Swiggy Instamart</label>
+                  <label><input type="checkbox" value="zepto" checked /> Zepto</label>
+                </div>
+              </fieldset>
               <button class="btn btn--primary" id="compare-button" type="button">
-                <span class="button-label">Compare estimated prices</span>
+                <span class="button-label">Compare prices</span>
                 <span class="spinner" aria-hidden="true"></span>
               </button>
-            </div>
+            </section>
           </div>
         </form>
       </section>
@@ -112,10 +148,10 @@
       <section class="transcription-shell" id="transcription" aria-labelledby="transcription-title" hidden>
         <header class="transcription-head">
           <div>
-            <span class="comparison-kicker">Before provider search</span>
-            <h2 id="transcription-title">Review the transcription.</h2>
+            <span class="comparison-kicker">Photo check</span>
+            <h2 id="transcription-title">Check what the photo says</h2>
             <p id="transcription-summary">
-              Correct names, brands, and quantities here. Nothing below has been sent to a grocery provider yet.
+              Correct product names, brands, and quantities before the app searches for products.
             </p>
           </div>
           <div class="confidence-key" aria-label="Transcription confidence legend">
@@ -131,7 +167,7 @@
             <span class="spinner" aria-hidden="true"></span>
           </button>
           <button class="btn btn--primary" id="continue-reviewed" type="button">
-            <span class="button-label">Search the reviewed list</span>
+            <span class="button-label">Use this list</span>
             <span class="spinner" aria-hidden="true"></span>
           </button>
         </div>
@@ -140,14 +176,14 @@
       <section class="progress-band" id="progress" aria-labelledby="progress-title" hidden>
         <div class="content-shell progress-layout">
           <div>
-            <h2 id="progress-title">Working through the list</h2>
+            <h2 id="progress-title">Building your result</h2>
             <p id="progress-message" aria-live="polite">Starting the planner…</p>
           </div>
           <ol class="stage-list" id="stage-list">
-            <li data-stage="planner"><span>1</span>Plan</li>
-            <li data-stage="retrieval"><span>2</span>Search</li>
-            <li data-stage="matcher"><span>3</span>Match</li>
-            <li data-stage="constraints"><span>4</span>Check</li>
+            <li data-stage="planner"><span>1</span><div><strong>Read list</strong><small>Understand each item</small></div></li>
+            <li data-stage="retrieval"><span>2</span><div><strong>Search apps</strong><small>Find available products</small></div></li>
+            <li data-stage="matcher"><span>3</span><div><strong>Choose matches</strong><small>Rank the best fit</small></div></li>
+            <li data-stage="constraints"><span>4</span><div><strong>Check totals</strong><small>Verify packs and budget</small></div></li>
           </ol>
         </div>
       </section>
@@ -155,8 +191,8 @@
       <section class="review-shell" id="review" aria-labelledby="review-title" hidden>
         <header class="review-head">
           <div>
-            <h2 id="review-title">Best match selected</h2>
-            <p>One product per request, ranked by fit, value, delivery, and your previous orders.</p>
+            <h2 id="review-title">Review your product matches</h2>
+            <p id="review-summary">Check the selected product and pack for every item.</p>
           </div>
           <div class="total-block" aria-live="polite">
             <span>Draft total</span>
@@ -171,21 +207,27 @@
       <section class="comparison-shell" id="comparison" aria-labelledby="comparison-title" hidden>
         <header class="comparison-head">
           <div>
-            <span class="comparison-kicker">Estimated comparison</span>
-            <h2 id="comparison-title">Same list, app by app.</h2>
+            <span class="comparison-kicker">No cart changes</span>
+            <h2 id="comparison-title">Price comparison</h2>
             <p id="comparison-summary">Comparing item coverage, estimated fees, and delivery.</p>
           </div>
           <div class="comparison-winner" id="comparison-winner" aria-live="polite"></div>
         </header>
-        <div class="comparison-reasons" id="comparison-reasons" role="status"></div>
+        <details class="comparison-reason-details" id="comparison-reason-details">
+          <summary>Why these totals differ</summary>
+          <div class="comparison-reasons" id="comparison-reasons" role="status"></div>
+        </details>
+        <p class="comparison-edit-help" id="comparison-edit-help">
+          Want a different product or pack count? Change it below and the total will update.
+        </p>
         <div class="comparison-grid" id="comparison-grid"></div>
         <div class="comparison-actions">
           <div>
-            <strong>Want exact fees?</strong>
-            <p>Verified mode requires empty carts, provider write access, and one explicit confirmation.</p>
+            <strong>Need exact delivery and handling fees?</strong>
+            <p>The app can temporarily build each cart, read its total, and ask what to keep. Every participating cart must start empty.</p>
           </div>
           <button class="btn btn--soft" id="verify-comparison" type="button">
-            <span class="button-label">Check verified-mode readiness</span>
+            <span class="button-label">Check exact-total requirements</span>
             <span class="spinner" aria-hidden="true"></span>
           </button>
         </div>
@@ -206,7 +248,7 @@
     <aside class="confirm-bar" id="confirm-bar" hidden>
       <div>
         <strong id="confirm-count">0 items selected</strong>
-        <span id="confirm-mode">Review first. Checkout remains outside this app.</span>
+        <span id="confirm-mode">Review the matches before adding them. Checkout stays in the grocery app.</span>
       </div>
       <button class="btn btn--primary" id="confirm-button" type="button">
         <span class="button-label">Run safe test</span>
@@ -215,16 +257,16 @@
     </aside>
 
     <footer class="foot-stmt">
-      <p class="foot-stmt__line">You make the final call on every item.</p>
+      <p class="foot-stmt__line">Start with a list. Finish with products you can inspect.</p>
       <div class="foot-stmt__meta">
-        <span>Photo Shopping</span>
-        <span>Local tool · No automatic checkout</span>
+        <span>Photo Shopping · Your list → product matches → cart</span>
+        <span>Checkout and payment always happen in the grocery app.</span>
       </div>
     </footer>
 
     <dialog class="summary-dialog" id="summary-dialog" aria-labelledby="summary-title">
       <div class="dialog-head">
-        <h2 id="summary-title">Safety test result</h2>
+        <h2 id="summary-title">Cart update result</h2>
         <button class="icon-button" id="close-summary" type="button" aria-label="Close summary">
           <svg class="line-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg>
         </button>

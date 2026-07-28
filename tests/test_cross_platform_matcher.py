@@ -107,6 +107,22 @@ def test_empty_provider_map_returns_empty_picks():
     assert match_across_platforms(item, {}, _settings()).picks == {}
 
 
+def test_one_provider_uses_the_normal_single_cart_pick():
+    item = PlannedItem(search_term="black pen", quantity=1, unit="item")
+    candidates = [
+        _product("five", "Reynolds Brite Ball Pen Set (Black)", "5 pcs", 25.0),
+        _product("one", "Reynolds Trimax Roller Pen (Black)", "1 pc", 50.0),
+    ]
+
+    result = match_across_platforms(
+        item,
+        {"blinkit": candidates},
+        _settings(),
+    )
+
+    assert result.picks["blinkit"].product_id == "one"
+
+
 # --- Comparability: platforms must deliver the same amount, or none. ----------
 # A list written without quantities ("rajma") gives the matcher nothing to
 # verify against, so each platform used to pick its own best-value pack and the

@@ -6,7 +6,7 @@ from PIL import Image
 
 from .config import Settings
 from .local_vision import plan_locally
-from .llm import HFModelClient, ModelBackendError, NvidiaModelClient
+from .llm import GroqModelClient, HFModelClient, ModelBackendError, NvidiaModelClient
 from .models import CartPlan
 
 
@@ -47,8 +47,9 @@ Never add an item, brand, quantity, or preference that is not visible. Return JS
 "context":"brand or empty string","quantity":1,"unit":"one of: item, count, g, kg, ml, l, pack",
 "raw_text":"best transcription"}]}. Include exactly one correction for every supplied id."""
 
-
 def _hosted_client(settings: Settings):
+    if settings.model_backend == "groq":
+        return GroqModelClient(settings)
     if settings.model_backend == "nvidia":
         return NvidiaModelClient(settings)
     return HFModelClient(settings)
@@ -101,17 +102,52 @@ def _uncertain_crop_sheet(image_bytes: bytes, plan: CartPlan) -> tuple[bytes, li
     if not uncertain:
         return b"", []
     image = Image.open(BytesIO(image_bytes)).convert("RGB")
+    row_centers = sorted(
+        {
+            item.crop_box[1]
+            for item in plan.items
+            if len(item.crop_box) == 4 and item.crop_box[1] > 0
+        },
+        reverse=True,
+    )
     crops: list[Image.Image] = []
     for item in uncertain:
         x, y, width, height = item.crop_box
-        x_pad = max(0.025, width * 0.08)
-        y_pad = max(0.018, height * 0.35)
-        left = max(0, int((x - x_pad) * image.width))
-        right = min(image.width, int((x + width + x_pad) * image.width))
-        top = max(0, int((1 - (y + height / 2 + y_pad)) * image.height))
-        bottom = min(
-            image.height, int((1 - (y - height / 2 - y_pad)) * image.height)
+        # The local OCR box may cover only the characters it managed to read.
+        # For example, a handwritten "Maggi" box ended after "Ma", which meant
+        # every hosted model was shown a physically truncated word. Send the
+        # complete page-width line so cloud OCR is an independent reading rather
+        # than an attempt to complete the local engine's partial crop.
+        left = int(image.width * 0.025)
+        right = int(image.width * 0.975)
+        center_index = min(
+            range(len(row_centers)),
+            key=lambda index: abs(row_centers[index] - y),
         )
+        center = row_centers[center_index]
+        above = row_centers[center_index - 1] if center_index > 0 else None
+        below = (
+            row_centers[center_index + 1]
+            if center_index + 1 < len(row_centers)
+            else None
+        )
+        fallback_gap = max(0.06, min(0.18, height))
+        upper = (
+            (above + center) / 2
+            if above is not None
+            else min(1.0, center + (center - below) / 2)
+            if below is not None
+            else min(1.0, center + fallback_gap / 2)
+        )
+        lower = (
+            (center + below) / 2
+            if below is not None
+            else max(0.0, center - (above - center) / 2)
+            if above is not None
+            else max(0.0, center - fallback_gap / 2)
+        )
+        top = max(0, int((1 - upper) * image.height))
+        bottom = min(image.height, int((1 - lower) * image.height))
         crop = image.crop((left, top, right, bottom))
         if crop.width < 900:
             scale = 900 / max(1, crop.width)
@@ -128,6 +164,30 @@ def _uncertain_crop_sheet(image_bytes: bytes, plan: CartPlan) -> tuple[bytes, li
     output = BytesIO()
     sheet.save(output, format="JPEG", quality=92)
     return output.getvalue(), uncertain
+
+
+def _contextual_recheck_sheet(image_bytes: bytes, crop_sheet: bytes) -> bytes:
+    """One image containing full-list context and isolated row detail."""
+    full = Image.open(BytesIO(image_bytes)).convert("RGB")
+    crops = Image.open(BytesIO(crop_sheet)).convert("RGB")
+    target_width = 1200
+    full.thumbnail((target_width, 800))
+    crops.thumbnail((target_width, 1800))
+    width = max(full.width, crops.width)
+    gap = 45
+    sheet = Image.new(
+        "RGB",
+        (width, full.height + crops.height + gap * 2),
+        "white",
+    )
+    sheet.paste(full, ((width - full.width) // 2, gap))
+    sheet.paste(
+        crops,
+        ((width - crops.width) // 2, full.height + gap * 2),
+    )
+    output = BytesIO()
+    sheet.save(output, format="JPEG", quality=90)
+    return output.getvalue()
 
 
 def retry_uncertain_with_cloud(
@@ -160,15 +220,38 @@ def retry_uncertain_with_cloud(
         ]
     )
     cloud_settings = settings.model_copy(update={"model_backend": backend})
+    whole_photo_used = (
+        blind
+        and backend == "groq"
+        and len(uncertain) == len(plan.items)
+        and len(uncertain) >= 3
+    )
+    request_image = (
+        _contextual_recheck_sheet(image_bytes, crop_sheet)
+        if whole_photo_used
+        else crop_sheet
+    )
+    prompt = (
+        (
+            "The top section is the complete list for context. Below it are "
+            f"{len(uncertain)} isolated versions of those same rows in top-to-bottom "
+            "order. Reconcile the full context with each detailed row. Arrows are "
+            "bullets, never quantities. Do not merge rows or copy quantities between "
+            "rows. Common Indian grocery wording may include mung/moong dal, chana "
+            "bhuna, garam masala, and aam ka achar. "
+        )
+        if whole_photo_used
+        else ""
+    ) + (
+        f"Uncertain items in crop order: {prompt_items}\n"
+        "Read each crop independently, correct each supplied id, and return "
+        "the JSON object only."
+    )
     payload = _hosted_client(cloud_settings).complete_json(
         model=settings.cloud_model,
         system=CLOUD_CORRECTION_SYSTEM,
-        prompt=(
-            f"Uncertain items in crop order: {prompt_items}\n"
-            "Read each crop independently, correct each supplied id, and return "
-            "the JSON object only."
-        ),
-        image_bytes=crop_sheet,
+        prompt=prompt,
+        image_bytes=request_image,
         image_media_type="image/jpeg",
         max_tokens=1000,
     )
@@ -201,7 +284,10 @@ def retry_uncertain_with_cloud(
                     "raw_text": str(correction.get("raw_text", item.raw_text)).strip(),
                     # Hosted OCR is a second opinion, not an authority. Keep the
                     # line excluded until the user checks the crop and confirms it.
-                    "confidence": max(item.confidence, 0.65),
+                    "confidence": max(
+                        item.confidence,
+                        0.9 if whole_photo_used else 0.65,
+                    ),
                     "needs_review": True,
                     "confirmed": False,
                     "recognition_notes": [
@@ -222,7 +308,12 @@ def retry_uncertain_with_cloud(
             continue
     plan.processing_note += (
         f" Uncertain line crops were sent to the configured {backend.title()} model "
-        "after explicit approval; the rest of the photo stayed local. Cloud suggestions "
+        + (
+            "and the complete image was rechecked because every local row was uncertain. "
+            if whole_photo_used
+            else "after explicit approval; the rest of the photo stayed local. "
+        )
+        + "Cloud suggestions "
         "remain marked for review."
     )
     return plan

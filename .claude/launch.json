@@ -1,0 +1,28 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "photo-shopping-safe",
+      "runtimeExecutable": "env",
+      "runtimeArgs": [
+        "SAFETY_LOCK=true",
+        "DRY_RUN=true",
+        "AUTO_ADD_TO_CART=false",
+        "BLINKIT_CART_WRITES=false",
+        "INSTAMART_CART_WRITES=false",
+        "ZEPTO_CART_WRITES=false",
+        "BROWSER_HEADLESS=true",
+        "RECOGNITION_POLICY=review",
+        ".venv/bin/python",
+        "-m",
+        "uvicorn",
+        "app.main:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8010"
+      ],
+      "port": 8010
+    }
+  ]
+}

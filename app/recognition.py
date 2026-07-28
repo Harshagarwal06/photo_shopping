@@ -91,9 +91,20 @@ def _build_hypotheses(
 ) -> list[_Hypothesis]:
     hypotheses = [_Hypothesis(local.model_copy(deep=True), "local")]
     if cloud is not None:
-        cloud_copy = cloud.model_copy(deep=True)
-        cloud_copy.quantity = local.quantity
-        cloud_copy.unit = local.unit
+        cloud_copy = (
+            _hypothesis_from_raw(cloud.raw_text, cloud)
+            if cloud.raw_text
+            else None
+        ) or cloud.model_copy(deep=True)
+        cloud_copy.confidence = max(cloud_copy.confidence, cloud.confidence)
+        cloud_copy.source = cloud.source
+        cloud_has_visible_measurement = (
+            cloud_copy.unit in {"g", "kg", "ml", "l"}
+            and bool(re.search(r"\d", local.raw_text))
+        )
+        if not cloud_has_visible_measurement:
+            cloud_copy.quantity = local.quantity
+            cloud_copy.unit = local.unit
         hypotheses.append(_Hypothesis(cloud_copy, "cloud"))
     for raw in [*local.alternatives, local.raw_text]:
         parsed = _hypothesis_from_raw(raw, local)
@@ -220,6 +231,29 @@ def _independent_brand_prefix_support(
         ):
             supported_sources.add(hypothesis.source)
     return len(supported_sources)
+
+
+def _local_cloud_prefix_support(hypotheses: list[_Hypothesis]) -> bool:
+    """Whether both OCR engines saw compatible product-word prefixes."""
+    local_tokens = {
+        token
+        for hypothesis in hypotheses
+        if hypothesis.source == "local"
+        for token in _tokens(hypothesis.item.provider_query)
+        if len(token) >= 2
+    }
+    cloud_tokens = {
+        token
+        for hypothesis in hypotheses
+        if hypothesis.source == "cloud"
+        for token in _tokens(hypothesis.item.provider_query)
+        if len(token) >= 2
+    }
+    return any(
+        local.startswith(cloud) or cloud.startswith(local)
+        for local in local_tokens
+        for cloud in cloud_tokens
+    )
 
 
 def _catalog_brand_correction(
@@ -356,7 +390,17 @@ async def resolve_plan_autonomously(
             continue
         cloud = cloud_by_id.get(local.id)
         hypotheses = _build_hypotheses(local, cloud, settings)
-        search_results = await _search_hypotheses(providers, hypotheses, settings)
+        trusted_contextual_cloud = any(
+            hypothesis.source == "cloud"
+            and hypothesis.item.confidence >= 0.9
+            and _lexicon_score(hypothesis.item) >= 0.8
+            for hypothesis in hypotheses
+        )
+        search_results = (
+            {}
+            if trusted_contextual_cloud
+            else await _search_hypotheses(providers, hypotheses, settings)
+        )
         for hypothesis in hypotheses:
             hypothesis.catalog_hits = _catalog_hits(hypothesis, search_results)
         catalog_correction = _catalog_brand_correction(
@@ -378,13 +422,42 @@ async def resolve_plan_autonomously(
             best.catalog_hits >= catalog_quorum
             and best.score >= settings.autonomous_catalog_confidence
         )
-        if best.score >= settings.autonomous_accept_confidence or catalog_supported:
+        # A partial local word such as "Ma" and a complete cloud read such as
+        # "Maggi noodles" have low whole-string similarity even though they are
+        # compatible. Permit the cloud hypothesis only when the visible local
+        # prefix, grocery lexicon, and a real provider result all corroborate it.
+        prefix_catalog_supported = (
+            best.source == "cloud"
+            and best.catalog_hits >= catalog_quorum
+            and _lexicon_score(best.item) >= 0.5
+            and _local_cloud_prefix_support(hypotheses)
+        )
+        contextual_cloud_supported = (
+            best.source == "cloud"
+            and best.item.confidence >= 0.9
+            and _lexicon_score(best.item) >= 0.8
+        )
+        if (
+            best.score >= settings.autonomous_accept_confidence
+            or catalog_supported
+            or prefix_catalog_supported
+            or contextual_cloud_supported
+        ):
+            chosen_quantity = local.quantity
+            chosen_unit = local.unit
+            if (
+                best.source == "cloud"
+                and best.item.unit in {"g", "kg", "ml", "l"}
+                and re.search(r"\d", local.raw_text)
+            ):
+                chosen_quantity = best.item.quantity
+                chosen_unit = best.item.unit
             chosen = best.item.model_copy(
                 deep=True,
                 update={
                     "id": local.id,
-                    "quantity": local.quantity,
-                    "unit": local.unit,
+                    "quantity": chosen_quantity,
+                    "unit": chosen_unit,
                     "crop_box": list(local.crop_box),
                     "needs_review": False,
                     "confirmed": True,

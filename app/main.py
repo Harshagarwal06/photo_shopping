@@ -192,6 +192,11 @@ async def prepare_plan(
         local_plan = plan.model_copy(deep=True)
         cloud_plan: CartPlan | None = None
         cloud_note = ""
+        whole_photo_recheck = (
+            settings.cloud_backend == "groq"
+            and len(plan.items) >= 3
+            and all(item.needs_review for item in plan.items)
+        )
         if settings.cloud_backend is not None:
             try:
                 cloud_plan = await asyncio.to_thread(
@@ -202,9 +207,14 @@ async def prepare_plan(
                     blind=True,
                 )
                 cloud_note = (
-                    f" Only uncertain line crops were sent to "
-                    f"{settings.cloud_backend.title()} for an independent second opinion; "
-                    "the complete photograph stayed local."
+                    f" {settings.cloud_backend.title()} provided an independent "
+                    + (
+                        "line-crop and whole-image recheck because every local row "
+                        "was uncertain."
+                        if whole_photo_recheck
+                        else "second opinion on uncertain line crops; the complete "
+                        "photograph stayed local."
+                    )
                 )
             except ModelBackendError as exc:
                 cloud_note = (
@@ -222,6 +232,12 @@ async def prepare_plan(
             selected_providers,
             settings,
         )
+        if whole_photo_recheck and cloud_plan is not None:
+            resolved.processing_note = resolved.processing_note.replace(
+                "The handwriting photo was not sent to an external model provider.",
+                "The handwriting photo was rechecked by Groq because every locally "
+                "segmented row was uncertain.",
+            )
         resolved.processing_note += cloud_note
         return resolved
 

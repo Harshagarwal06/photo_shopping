@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from .config import Settings
 from .constraints import parse_measurement, requested_measurement, units_for_candidate
-from .llm import HFModelClient, ModelBackendError, NvidiaModelClient
+from .llm import GroqModelClient, HFModelClient, ModelBackendError, NvidiaModelClient
 from .models import CrossPlatformMatch, MatchDecision, PlannedItem, Product
 
 
@@ -24,6 +24,8 @@ Schema: {"product_id": "candidate id", "units_to_add": 1, "reason": "short reaso
 
 
 def _hosted_client(settings: Settings):
+    if settings.model_backend == "groq":
+        return GroqModelClient(settings)
     if settings.model_backend == "nvidia":
         return NvidiaModelClient(settings)
     return HFModelClient(settings)
@@ -65,6 +67,8 @@ MATCH_SYNONYMS = {
 }
 MATCH_TOKEN_ALIASES = {
     "cao": "cow",
+    "coca": "coke",
+    "cola": "coke",
     "mill": "milk",
 }
 REQUIRED_MODIFIER_GROUPS = {
@@ -85,6 +89,12 @@ REQUIRED_MODIFIER_GROUPS = {
 ORDER_SENSITIVE_PHRASES = {
     # "chai masala" is a spice; "masala chai/tea" is the prepared tea product.
     "masala chai": {"masala chai", "masala tea"},
+}
+UNREQUESTED_VARIANT_GROUPS = {
+    # Substituting these changes the product, not merely its presentation.
+    # A generic "Coke" request must not silently become Diet Coke or Coke Zero.
+    "diet": {"diet", "diets", "zero sugar", "sugar free"},
+    "decaf": {"decaf", "decaffeinated"},
 }
 
 
@@ -150,6 +160,22 @@ def match_is_reasonable(item: PlannedItem, product: Product) -> tuple[bool, str]
             continue
         if not any(_contains_phrase(product_text, phrase) for phrase in accepted_phrases):
             return False, f"The required modifier “{modifier}” is not present."
+    for label, variant_phrases in UNREQUESTED_VARIANT_GROUPS.items():
+        if any(_contains_phrase(request_text, phrase) for phrase in variant_phrases):
+            continue
+        if any(_contains_phrase(product_text, phrase) for phrase in variant_phrases):
+            return False, f"The product adds an unrequested {label} variant."
+
+    # Grocery catalogues mix coffee powder with ready-to-drink dairy products.
+    # A bare "coffee" list item means the pantry product unless the request also
+    # says milk, drink, flavoured, or a similar ready-to-drink form.
+    if (
+        "coffee" in query_tokens
+        and "milk" in name_tokens
+        and {"flavoured", "flavored", "cafe"} & name_tokens
+        and not {"milk", "drink", "flavoured", "flavored", "cafe"} & query_tokens
+    ):
+        return False, "Coffee-flavoured milk is not the requested coffee product."
 
     matched = 0
     similarities: list[float] = []
@@ -575,6 +601,15 @@ def _fallback_cross_match(
         provider: _fallback_match(item, candidates)
         for provider, candidates in candidates_by_provider.items()
     }
+    # With one platform there is nothing to make comparable. Reusing the normal
+    # single-cart decision also preserves an implicit request for one item; the
+    # cross-platform quantity search otherwise prefers a cheaper five-pack over
+    # an available single pen.
+    if len(independent) == 1:
+        return CrossPlatformMatch(
+            picks=independent,
+            equivalence_note="Matched on the selected platform.",
+        )
 
     # A comparison is only meaningful when every platform supplies the same
     # amount. When the request states one, that is the reference. When it does

@@ -1,5 +1,14 @@
 [
   {
+    "date": "2026-07-28",
+    "macrostructure": "Narrative Workflow",
+    "theme": "Hum",
+    "enrichment": "none",
+    "nav": "N1b",
+    "footer": "Ft2",
+    "brief": "Self-explanatory photo and text grocery workflow with explicit shop and comparison paths"
+  },
+  {
     "date": "2026-07-17",
     "macrostructure": "Workbench",
     "theme": "Hum",
@@ -9,4 +18,3 @@
     "brief": "Single-user photo and text grocery cart assistant for Blinkit"
   }
 ]
-

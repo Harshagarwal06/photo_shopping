@@ -108,5 +108,80 @@ def test_cloud_retry_sends_only_uncertain_line_crops_and_merges_correction(monke
     sent = Image.open(BytesIO(captured["image_bytes"]))
     assert sent.width < source.width
     assert sent.height < source.height
+    # The retry strip spans the line even when the local word box covered only
+    # the first few recognized characters.
+    assert sent.width >= source.width * 0.9
     assert "uncertain line crops" in result.processing_note.casefold()
     assert "remain marked for review" in result.processing_note.casefold()
+
+
+def test_groq_all_uncertain_rows_use_one_context_plus_detail_request(monkeypatch):
+    captured = []
+
+    class ContextClient:
+        def __init__(self, _settings):
+            pass
+
+        def complete_json(self, **kwargs):
+            captured.append(kwargs)
+            return {
+                "corrections": [
+                    {
+                        "id": f"line-{index}",
+                        "search_term": name,
+                        "context": "",
+                        "quantity": quantity,
+                        "unit": unit,
+                        "raw_text": raw,
+                    }
+                    for index, (name, quantity, unit, raw) in enumerate(
+                        [
+                            ("Mung Dal", 1, "item", "Mung Dal"),
+                            ("Garam Masala", 200, "g", "Garam Masala 200 gm"),
+                            ("Aam ka Achar", 100, "g", "Aam ka Achar 100 gm"),
+                        ]
+                    )
+                ]
+            }
+
+    monkeypatch.setattr("app.planner.GroqModelClient", ContextClient)
+    source = Image.new("RGB", (1200, 800), "white")
+    image_bytes = BytesIO()
+    source.save(image_bytes, format="PNG")
+    plan = CartPlan(
+        items=[
+            PlannedItem(
+                id=f"line-{index}",
+                search_term="uncertain",
+                raw_text=f"uncertain {index}",
+                needs_review=True,
+                confidence=0.2,
+                crop_box=[0, y, 0.5, 0.08],
+            )
+            for index, y in enumerate((0.8, 0.5, 0.2))
+        ]
+    )
+
+    result = retry_uncertain_with_cloud(
+        plan=plan,
+        image_bytes=image_bytes.getvalue(),
+        settings=Settings(
+            _env_file=None,
+            model_backend="local",
+            groq_api_key="gsk-test",
+            cloud_model_backend="groq",
+        ),
+        blind=True,
+    )
+
+    assert len(captured) == 1
+    assert "top section is the complete list" in captured[0]["prompt"].casefold()
+    sent = Image.open(BytesIO(captured[0]["image_bytes"]))
+    assert sent.height > source.height
+    assert [item.search_term for item in result.items] == [
+        "Mung Dal",
+        "Garam Masala",
+        "Aam ka Achar",
+    ]
+    assert [item.quantity for item in result.items] == [1, 200, 100]
+    assert "complete image was rechecked" in result.processing_note.casefold()

@@ -4,6 +4,8 @@ from app.local_vision import (
     RecognizedLine,
     _normalise_ocr_candidate,
     _parse_item,
+    _remove_merged_ocr_boxes,
+    _repair_arrow_bullets,
     plan_locally,
 )
 
@@ -66,6 +68,31 @@ def test_container_words_inside_a_product_name_are_left_alone(line):
     item = _parse_item(line, "photo")
 
     assert (item.search_term, item.quantity, item.unit) == (line, 1, "item")
+
+
+def test_tall_cross_scale_box_spanning_two_rows_is_removed():
+    first = RecognizedLine(0.5, "Mung Dal", y=0.88, height=0.14)
+    merged = RecognizedLine(0.5, "Mung Dal Yellow Chana", y=0.82, height=0.32)
+    second = RecognizedLine(0.5, "Yellow Chana", y=0.76, height=0.15)
+
+    assert _remove_merged_ocr_boxes([first, merged, second]) == [first, second]
+
+
+def test_arrow_alternative_prevents_bullet_becoming_quantity():
+    line = RecognizedLine(
+        0.5,
+        "2 Yellow Chana Bhuna",
+        alternatives=["→ Yellow Chana Bhuna"],
+        x=0.0,
+        y=0.7,
+        width=0.6,
+        height=0.1,
+    )
+
+    repaired = _repair_arrow_bullets([line])
+
+    assert repaired[0].text == "→ Yellow Chana Bhuna"
+    assert repaired[0].alternatives[0] == "2 Yellow Chana Bhuna"
 
 
 @pytest.mark.parametrize(
@@ -145,6 +172,14 @@ def test_misread_terms_resolve(line, term):
 )
 def test_known_and_unknown_words_are_never_fuzzed_onto_something_else(line):
     assert _parse_item(line, "photo").search_term == line
+
+
+@pytest.mark.parametrize("line", ["Water Bottle", "Coke Can", "black pen", "Coffee"])
+def test_clear_common_list_rows_do_not_need_autonomous_rescue(line):
+    item = _parse_item(line, "photo", vision_confidence=1)
+
+    assert item.confidence == 1
+    assert item.needs_review is False
 
 
 def test_known_leading_brand_moves_to_selection_context():
