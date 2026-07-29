@@ -6,12 +6,16 @@ from collections import Counter
 from typing import Any, Iterable
 
 from ..config import Settings
-from ..models import AddResult, Product, ProviderCapabilities
-from .base import (
+from ..models import (
+    AddResult,
     CartLine,
     CartSummary,
-    ConnectResult,
     FeeLine,
+    Product,
+    ProviderCapabilities,
+)
+from .base import (
+    ConnectResult,
     GroceryProvider,
     ProviderAddress,
     ProviderAuthError,
@@ -22,7 +26,6 @@ from .base import (
 from .instamart_oauth import SwiggyOAuthClient
 from .instamart_transport import InstamartMCPTransport
 from .token_store import KeyringTokenStore, TokenStore
-
 
 SPIN_KEYS = ("spinId", "spin_id", "spinID")
 NAME_KEYS = ("name", "title", "productName", "product_name", "displayName")

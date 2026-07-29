@@ -5,7 +5,6 @@ from app.config import Settings
 from app.matcher import _fallback_match, match_product
 from app.models import PlannedItem, Product
 
-
 FIXTURES = Path(__file__).parent / "fixtures"
 
 

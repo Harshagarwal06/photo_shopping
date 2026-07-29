@@ -17,6 +17,8 @@ Zepto use isolated local browser profiles.
   relevance gate so malformed handwriting cannot silently select an unrelated item.
 - An optional Groq Qwen vision retry that sends only isolated uncertain line strips,
   never the complete photograph.
+- A local capture-quality preflight for resolution, lighting, contrast, focus, tilt,
+  and perspective, with specific retake guidance before unsafe photos reach OCR.
 - A common provider interface with Blinkit and Instamart active side by side.
 - Official Instamart OAuth 2.1 with PKCE and dynamic client registration.
 - OAuth tokens stored in the macOS Keychain, never in the browser or project files.
@@ -29,6 +31,9 @@ Zepto use isolated local browser profiles.
   are not exposed; cart updates remain separately gated and operation-scoped.
 - Estimated cross-platform comparison with item coverage, fee estimates, substitutions,
   delivery details, and a deterministic recommendation.
+- Coalesced, paced provider searches with transient retry/backoff and circuit breaking.
+- Expiring SQLite recovery for drafts and comparison operations, plus privacy-filtered
+  reliability metrics that never contain requests, photos, addresses, tokens, or carts.
 - Token-gated verified comparison preflight that requires empty carts and explicit
   provider-specific cart-write opt-ins.
 
@@ -157,7 +162,8 @@ playwright install chromium
 ## Demo and tests
 
 `DEMO_MODE=true` exercises the interface with a local catalogue and never mutates a
-real cart.
+real cart. Demo mode parses the request you actually submit; only provider products
+and prices are synthetic.
 
 ```bash
 .venv/bin/python -m pytest
@@ -170,3 +176,42 @@ lists.
 
 The broader degraded-photo, parsing, matching, provider, and security results are in
 [the 27 July project scenario audit](docs/project-scenario-audit-2026-07-27.md).
+
+For development checks:
+
+```bash
+pip install -r requirements-dev.txt
+.venv/bin/ruff check .
+.venv/bin/pyright
+.venv/bin/python -m pytest --cov=app
+RUN_BROWSER_TESTS=1 .venv/bin/python -m pytest -m browser
+```
+
+The browser test requires Chromium once:
+
+```bash
+.venv/bin/python -m playwright install chromium
+```
+
+## Held-out handwriting evaluation
+
+Known fixtures are regression inputs, not handwriting-accuracy evidence. Copy
+`docs/held-out-handwriting-manifest.example.json`, point it at photographs outside
+`tests/fixtures`, and keep `tuned_against` set to `false`:
+
+```bash
+.venv/bin/python tools/evaluate_handwriting.py path/to/manifest.json \
+  --output handwriting-report.json
+```
+
+The evaluator reports exact lines, exact structured items, field accuracy, review
+rate, missed items, and unsafe false accepts. It refuses the tuned fixture directory.
+
+## Local diagnostics and recovery
+
+Drafts, proposals, and completed comparison operations survive server restarts for
+24 hours by default in `.photo_shopping_state.sqlite3`. Photographs, delivery
+addresses, OAuth credentials, and confirmation tokens are never written there.
+
+`GET /api/diagnostics` reports aggregate provider-search and stage-latency health.
+It contains no query text, product names, cart contents, or error messages.

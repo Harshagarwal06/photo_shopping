@@ -367,8 +367,11 @@ class BlinkitClient:
             else:
                 message = f"Blinkit's browser could not start: {message.splitlines()[0]}"
             raise BlinkitError(message) from exc
-        self._context.set_default_timeout(self.settings.navigation_timeout_ms)
-        self._page = self._context.pages[0] if self._context.pages else await self._context.new_page()
+        context = self._context
+        if context is None:
+            raise BlinkitError("Blinkit's browser context did not start.")
+        context.set_default_timeout(self.settings.navigation_timeout_ms)
+        self._page = context.pages[0] if context.pages else await context.new_page()
         self._register_cleanup()
         return self._page
 

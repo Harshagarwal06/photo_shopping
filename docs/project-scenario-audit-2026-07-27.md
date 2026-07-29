@@ -5,8 +5,9 @@ Date: 27 July 2026
 ## Executive summary
 
 The project is strong on cart safety, exact quantities, review-before-search, and
-provider abstraction. The captured real-result ranking corpus is 19/19 and the
-complete automated suite contains 292 tests.
+provider abstraction. The captured real-result ranking corpus is 19/19. The
+automated suite has continued growing since this dated audit; use the current
+pytest result rather than this document for its live test count.
 
 The supplied handwriting fixtures are exact on their clear original images, but
 that number should not be read as handwriting accuracy. Part of it is carried by

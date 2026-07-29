@@ -8,7 +8,6 @@ from app.config import Settings
 from app.models import CartPlan, PlannedItem
 from app.planner import plan_cart, retry_uncertain_with_cloud
 
-
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
@@ -50,6 +49,21 @@ def test_planner_requires_photo_or_text():
         assert "photo" in str(exc)
     else:
         raise AssertionError("Empty requests must be rejected")
+
+
+def test_demo_mode_parses_the_submitted_request_instead_of_a_fixed_cart():
+    plan = plan_cart(
+        text="cheapest coffee 2 packs under ₹500",
+        image_bytes=None,
+        image_media_type="image/jpeg",
+        settings=Settings(_env_file=None, demo_mode=True, model_backend="hf"),
+    )
+
+    assert [item.search_term for item in plan.items] == ["coffee"]
+    assert plan.items[0].quantity == 2
+    assert plan.constraints.cart_budget == 500
+    assert plan.constraints.preferences == ["cheapest"]
+    assert "locally" in plan.processing_note.casefold()
 
 
 def test_cloud_retry_sends_only_uncertain_line_crops_and_merges_correction(monkeypatch):

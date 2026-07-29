@@ -10,7 +10,6 @@ from PIL import Image, ImageEnhance, ImageFilter
 
 from app.local_vision import plan_locally
 
-
 FIXTURE = Path(__file__).parent / "fixtures" / "grocery_list_brands.jpeg"
 EXPECTED = {
     ("tomato soup powder", "knorr"),

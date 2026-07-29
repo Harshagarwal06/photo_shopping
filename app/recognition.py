@@ -11,10 +11,9 @@ from difflib import SequenceMatcher
 from .config import Settings
 from .local_vision import KNOWN_TERMS, _normalise_ocr_candidate, _parse_item
 from .matcher import match_is_reasonable
-from .models import CartPlan, PlannedItem, Product, PROVIDER_QUERY_BRANDS
+from .models import PROVIDER_QUERY_BRANDS, CartPlan, PlannedItem, Product
 from .providers.base import GroceryProvider
 from .search_cache import cached_search
-
 
 logger = logging.getLogger(__name__)
 

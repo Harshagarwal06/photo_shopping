@@ -7,7 +7,6 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field, computed_field, field_validator
 
-
 PROVIDER_QUERY_BRANDS = (
     "aashirvaad", "amul", "britannia", "cadbury", "colgate", "daawat", "fortune",
     "havmor", "kelloggs", "kitkat", "knorr", "kurkure", "maggi", "mother dairy",
@@ -89,6 +88,14 @@ class CartPlan(BaseModel):
     items: list[PlannedItem] = Field(min_length=1)
     constraints: CartConstraints = Field(default_factory=CartConstraints)
     processing_note: str = ""
+
+
+class ImageQualityReport(BaseModel):
+    status: Literal["good", "usable", "retake"]
+    score: float = Field(ge=0, le=1)
+    metrics: dict[str, float] = Field(default_factory=dict)
+    issues: list[str] = Field(default_factory=list)
+    guidance: list[str] = Field(default_factory=list)
 
 
 class Product(BaseModel):

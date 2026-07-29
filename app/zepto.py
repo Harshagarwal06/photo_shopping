@@ -4,8 +4,7 @@ import asyncio
 import hashlib
 import re
 from pathlib import Path
-from urllib.parse import quote_plus
-from urllib.parse import urljoin
+from urllib.parse import quote_plus, urljoin
 
 from playwright.async_api import BrowserContext, Page, Playwright, async_playwright
 
@@ -94,8 +93,9 @@ class ZeptoClient:
             return self._page
         self.settings.zepto_profile_dir.mkdir(parents=True, exist_ok=True)
         try:
-            self._playwright = await async_playwright().start()
-            self._context = await self._playwright.chromium.launch_persistent_context(
+            playwright = await async_playwright().start()
+            self._playwright = playwright
+            self._context = await playwright.chromium.launch_persistent_context(
                 user_data_dir=str(Path(self.settings.zepto_profile_dir)),
                 headless=self.settings.browser_headless,
                 viewport={"width": 1380, "height": 900},
@@ -107,11 +107,14 @@ class ZeptoClient:
             self._playwright = None
             message = str(exc).strip().splitlines()[0] if str(exc).strip() else "Unknown error"
             raise ZeptoError(f"Zepto's browser could not start: {message}") from exc
-        self._context.set_default_timeout(self.settings.navigation_timeout_ms)
+        context = self._context
+        if context is None:
+            raise ZeptoError("Zepto's browser context did not start.")
+        context.set_default_timeout(self.settings.navigation_timeout_ms)
         self._page = (
-            self._context.pages[0]
-            if self._context.pages
-            else await self._context.new_page()
+            context.pages[0]
+            if context.pages
+            else await context.new_page()
         )
         return self._page
 

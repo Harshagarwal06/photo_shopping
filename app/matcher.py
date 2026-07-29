@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import re
 from difflib import SequenceMatcher
+from typing import TypeAlias
 
 from pydantic import ValidationError
 
@@ -10,7 +11,6 @@ from .config import Settings
 from .constraints import parse_measurement, requested_measurement, units_for_candidate
 from .llm import GroqModelClient, HFModelClient, ModelBackendError, NvidiaModelClient
 from .models import CrossPlatformMatch, MatchDecision, PlannedItem, Product
-
 
 MATCHER_SYSTEM = """You rank real grocery product candidates for one planned grocery item.
 Return only a JSON object with product_id, units_to_add, and reason. Choose only an in-stock
@@ -65,12 +65,13 @@ MATCH_SYNONYMS = {
     "polish": {"enamel", "paint"},
     "shower": {"bodywash"},
 }
-MATCH_TOKEN_ALIASES = {
+MATCH_TOKEN_ALIASES: dict[str, str] = {
     "cao": "cow",
     "coca": "coke",
     "cola": "coke",
     "mill": "milk",
 }
+Supply: TypeAlias = dict[str, tuple[Product, int] | None]
 REQUIRED_MODIFIER_GROUPS = {
     "boneless": {"boneless"},
     "brown": {"brown"},
@@ -100,7 +101,7 @@ UNREQUESTED_VARIANT_GROUPS = {
 
 def _tokens(value: str) -> set[str]:
     return {
-        MATCH_TOKEN_ALIASES.get(token, token)
+        MATCH_TOKEN_ALIASES[token] if token in MATCH_TOKEN_ALIASES else token
         for token in TOKEN_RE.findall(value.casefold())
         if token not in IGNORED_TOKENS and not token.isdigit()
     }
@@ -618,7 +619,6 @@ def _fallback_cross_match(
     stated = _stated_reference(item)
     references = [stated] if stated else _comparable_references(item, candidates_by_provider)
 
-    Supply = dict[str, tuple[Product, int] | None]
     best: tuple[tuple[int, float, float], tuple[float, str], Supply] | None = None
     for reference in references:
         supplied: Supply = {

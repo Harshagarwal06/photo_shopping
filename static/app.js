@@ -19,6 +19,8 @@ const state = {
   cloudRetryAvailable: false,
   cloudRetryProvider: "cloud",
   recognitionPolicy: "review",
+  photoQuality: null,
+  photoQualityController: null,
 };
 
 const ui = {
@@ -27,6 +29,7 @@ const ui = {
   image: document.querySelector("#request-image"),
   uploadBox: document.querySelector("#upload-box"),
   fileName: document.querySelector("#file-name"),
+  photoQuality: document.querySelector("#photo-quality"),
   help: document.querySelector("#request-help"),
   error: document.querySelector("#request-error"),
   draftButton: document.querySelector("#draft-button"),
@@ -496,6 +499,17 @@ async function previewRequest(action, { useCloud = false } = {}) {
     ui.text.focus();
     return;
   }
+  if (hasImage && state.photoQuality?.status === "checking") {
+    showRequestError("Wait a moment while the photo quality check finishes.");
+    return;
+  }
+  if (hasImage && state.photoQuality?.status === "retake") {
+    showRequestError(
+      state.photoQuality.guidance?.join(" ")
+      || "Retake this photo in brighter, steadier conditions before continuing.",
+    );
+    return;
+  }
   state.pendingAction = action;
   const button = useCloud
     ? ui.cloudRetry
@@ -810,7 +824,6 @@ async function verifyComparisonReadiness() {
     }
     state.comparisonOperation = operation;
     renderComparison(operation.report);
-    showToast("Verified cart totals are ready. No checkout was attempted.");
   } catch (error) {
     showToast(error.message, { tone: "error", sticky: true });
   } finally {
@@ -1025,13 +1038,52 @@ async function continueReviewedPlan() {
   }
 }
 
-ui.image.addEventListener("change", () => {
+ui.image.addEventListener("change", async () => {
   const file = ui.image.files[0];
   ui.fileName.textContent = file ? file.name : "No photo selected";
   ui.uploadBox.classList.toggle("is-success", Boolean(file));
   ui.uploadBox.classList.remove("is-error");
   state.plan = null;
   ui.transcription.hidden = true;
+  state.photoQualityController?.abort();
+  state.photoQuality = null;
+  ui.photoQuality.hidden = true;
+  delete ui.photoQuality.dataset.status;
+  if (!file) return;
+
+  const controller = new AbortController();
+  state.photoQualityController = controller;
+  state.photoQuality = { status: "checking" };
+  ui.photoQuality.hidden = false;
+  ui.photoQuality.textContent = "Checking lighting, focus, resolution, and page angle…";
+  try {
+    const formData = new FormData();
+    formData.append("image", file);
+    const response = await fetch("/api/images/quality", {
+      method: "POST",
+      body: formData,
+      signal: controller.signal,
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || "Photo quality check failed.");
+    state.photoQuality = payload;
+    ui.photoQuality.dataset.status = payload.status;
+    if (payload.status === "good") {
+      ui.photoQuality.textContent = "Photo quality looks good for handwriting recognition.";
+    } else if (payload.status === "usable") {
+      ui.photoQuality.textContent = payload.guidance.join(" ")
+        || "This photo is usable, but a clearer retake may improve recognition.";
+    } else {
+      ui.photoQuality.textContent = `Retake recommended. ${payload.guidance.join(" ")}`;
+      ui.uploadBox.classList.remove("is-success");
+      ui.uploadBox.classList.add("is-error");
+    }
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    state.photoQuality = null;
+    ui.photoQuality.dataset.status = "usable";
+    ui.photoQuality.textContent = "Quality check unavailable; the photo will still be validated before recognition.";
+  }
 });
 
 ui.form.addEventListener("submit", buildDraft);
@@ -1115,7 +1167,6 @@ ui.addressSelect.addEventListener("change", async () => {
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || "Address selection failed.");
     applyProviderStatus(payload);
-    showToast(`Delivery address changed for ${state.providerName}.`);
   } catch (error) {
     showToast(error.message, { tone: "error", sticky: true });
   } finally {
@@ -1128,9 +1179,7 @@ ui.refreshAddresses.addEventListener("click", async () => {
   try {
     await loadProviderStatus(true);
     const addressCount = ui.addressSelect.options.length;
-    if (addressCount > 0) {
-      showToast("Swiggy delivery addresses refreshed.");
-    } else {
+    if (addressCount === 0) {
       showToast("No saved address found yet. Add one in Swiggy, then refresh again.", {
         tone: "error",
         sticky: true,
@@ -1176,7 +1225,6 @@ ui.providerSelect.addEventListener("change", async () => {
     // Re-read the persistent browser/OAuth session after changing providers.
     // Server restarts intentionally clear the backend's in-memory connection flag.
     await refreshApplicationState(true);
-    showToast(`Now shopping with ${state.providerName}.`);
   } catch (error) {
     ui.providerSelect.value = previousProvider;
     showToast(error.message, { tone: "error", sticky: true });
@@ -1293,8 +1341,7 @@ async function refreshApplicationState(refreshStatus = false) {
   if (!response.ok) throw new Error(health.detail || "Backend health check failed.");
   applyHealth(health);
   if (health.demo_mode) {
-    ui.loginButton.textContent = "Providers disabled in demo";
-    ui.loginButton.disabled = true;
+    ui.loginButton.hidden = true;
     ui.draftButton.disabled = false;
     updateActionCopy();
     return;
@@ -1328,10 +1375,16 @@ function applyProviderStatus(status) {
   state.providerConnected = status.connected;
   state.providerStatusMessage = status.message || "";
   state.providerName = status.display_name || state.providerName;
-  const shortProviderName = state.provider === "instamart" ? "Instamart" : state.providerName;
+  ui.loginButton.hidden = false;
   ui.loginButton.textContent = status.connected
-    ? `${shortProviderName} connected`
-    : `Connect ${state.providerName}`;
+    ? "Connected"
+    : "Connect";
+  ui.loginButton.setAttribute(
+    "aria-label",
+    status.connected
+      ? `${state.providerName} connected`
+      : `Connect ${state.providerName}`,
+  );
   setButtonState(ui.loginButton, status.connected ? "success" : "default");
   ui.loginButton.disabled = status.connected;
 
@@ -1369,9 +1422,6 @@ async function loadProviderStatus(refresh = false) {
   const params = new URLSearchParams(window.location.search);
   const providerError = params.get("provider_error");
   if (providerError) showToast(providerError, { tone: "error", sticky: true });
-  if (params.has("provider_connected")) {
-    showToast(`${state.providerName} connected.`);
-  }
   if (params.has("provider_connected") || providerError) {
     window.history.replaceState({}, "", window.location.pathname);
   }

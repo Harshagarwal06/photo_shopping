@@ -21,7 +21,6 @@ from .models import (
 from .providers.base import GroceryProvider
 from .search_cache import cached_search
 
-
 EventSink = Callable[[StreamEvent], None] | None
 
 

@@ -60,3 +60,21 @@ def test_arbitrary_bytes_cannot_reach_ocr_behind_a_heic_content_type():
     # A genuine container gets past upload validation and fails later, in OCR,
     # rather than being rejected as unreadable bytes.
     assert real_shape.status_code != 422
+
+
+def test_security_and_privacy_headers_cover_static_and_api_responses():
+    client = TestClient(app)
+
+    static = client.get("/")
+    api = client.get("/api/health")
+
+    for response in (static, api):
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.headers["x-frame-options"] == "DENY"
+        assert response.headers["referrer-policy"] == "no-referrer"
+        policy = response.headers["content-security-policy"]
+        assert "default-src 'self'" in policy
+        assert "frame-ancestors 'none'" in policy
+        assert "script-src 'self'" in policy
+        assert "fonts.googleapis.com" not in response.text
+    assert api.headers["cache-control"] == "no-store"

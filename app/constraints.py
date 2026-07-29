@@ -5,7 +5,6 @@ import re
 
 from .models import CartConstraints, DraftCart, DraftItem, PlannedItem, Product
 
-
 MEASURE_UNIT_PATTERN = (
     r"kg|g|gm|grams?|l|ltr|litres?|liters?|ml|pcs?|pieces?|count|eggs?|units?"
 )

@@ -1,0 +1,5 @@
+-r requirements.txt
+httpx2>=2.9,<3
+pyright>=1.1.400,<2
+pytest-cov>=7,<8
+ruff>=0.12,<1

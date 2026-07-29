@@ -1,4 +1,3 @@
-import pytest
 
 from app.compare import build_outcome, rank
 from app.config import Settings

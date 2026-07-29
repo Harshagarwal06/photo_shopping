@@ -1,22 +1,21 @@
 from __future__ import annotations
 
 import asyncio
-import json
+import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager
-from io import BytesIO
 from pathlib import Path
 from typing import AsyncIterator
-from urllib.parse import quote_plus, urlsplit
+from urllib.parse import quote_plus
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from PIL import Image, UnidentifiedImageError
 
 from .comparison_service import ComparisonService
 from .config import ROOT, get_settings
 from .constraints import enforce_constraints
+from .image_quality import analyze_image_quality
 from .llm import ModelBackendError
 from .matcher import match_product
 from .models import (
@@ -32,64 +31,46 @@ from .models import (
     ConfirmResponse,
     DraftCart,
     DraftItem,
-    ProviderSelectionRequest,
+    ImageQualityReport,
     ProposalOverrideRequest,
+    ProviderSelectionRequest,
     SearchRequest,
     StreamEvent,
     VerifiedComparisonRequest,
 )
-from .providers import GroceryProvider, ProviderError, create_providers
 from .planner import plan_cart, retry_uncertain_with_cloud
+from .providers import GroceryProvider, ProviderError, create_providers
 from .recognition import resolve_plan_autonomously
-from .search_cache import cached_search
-
+from .search_cache import SEARCH_CACHE, cached_search
+from .security import enforce_local_browser_origin
+from .state_store import SQLiteStateStore
+from .telemetry import TELEMETRY
+from .uploads import read_uploaded_image
 
 settings = get_settings()
 providers = create_providers(settings)
-comparison_service = ComparisonService(providers, settings)
+state_store = SQLiteStateStore(
+    settings.resolved_state_db_path,
+    record_ttl_seconds=settings.state_record_ttl_seconds,
+    telemetry_retention_seconds=settings.telemetry_retention_seconds,
+)
+TELEMETRY.configure(state_store)
+comparison_service = ComparisonService(providers, settings, state_store)
 ACTIVE_PROVIDER_ID = settings.grocery_provider
 DRAFTS: OrderedDict[str, DraftCart] = OrderedDict()
 DRAFT_CONSTRAINTS: OrderedDict[str, CartConstraints] = OrderedDict()
-ALLOWED_IMAGE_TYPES = {
-    "image/heic",
-    "image/heif",
-    "image/jpeg",
-    "image/png",
-    "image/webp",
-}
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    state_store.purge_expired()
     yield
     await asyncio.gather(*(provider.close() for provider in providers.values()))
+    state_store.purge_expired()
 
 
 app = FastAPI(title=settings.app_name, version="1.0.0", lifespan=lifespan)
-LOCAL_BROWSER_HOSTS = {"127.0.0.1", "::1", "localhost", "testserver"}
-
-
-@app.middleware("http")
-async def enforce_local_browser_origin(request: Request, call_next):
-    """Reject DNS-rebinding and cross-site browser writes to the local app."""
-    request_host = request.url.hostname
-    if request_host not in LOCAL_BROWSER_HOSTS:
-        return JSONResponse(
-            {"detail": "Photo Shopping accepts requests only on a local address."},
-            status_code=400,
-        )
-    if request.method not in {"GET", "HEAD", "OPTIONS"}:
-        origin = request.headers.get("origin")
-        if origin:
-            parsed = urlsplit(origin)
-            request_port = request.url.port or (443 if request.url.scheme == "https" else 80)
-            origin_port = parsed.port or (443 if parsed.scheme == "https" else 80)
-            if parsed.hostname not in LOCAL_BROWSER_HOSTS or origin_port != request_port:
-                return JSONResponse(
-                    {"detail": "Cross-origin requests to the local app are blocked."},
-                    status_code=403,
-                )
-    return await call_next(request)
+app.middleware("http")(enforce_local_browser_origin)
 
 
 def encode_event(event: StreamEvent) -> bytes:
@@ -116,56 +97,32 @@ def remember_draft(draft: DraftCart, constraints: CartConstraints) -> None:
     while len(DRAFTS) > settings.max_state_records:
         expired_id, _ = DRAFTS.popitem(last=False)
         DRAFT_CONSTRAINTS.pop(expired_id, None)
-
-
-HEIF_BRANDS = {
-    b"avif", b"avis", b"heic", b"heim", b"heis", b"heix",
-    b"hevc", b"hevm", b"hevs", b"hevx", b"mif1", b"msf1",
-}
-
-
-def _is_heif_container(image_bytes: bytes) -> bool:
-    """True for an ISO base-media file whose brand is a HEIF/HEIC one."""
-    return (
-        len(image_bytes) >= 16
-        and image_bytes[4:8] == b"ftyp"
-        and image_bytes[8:12] in HEIF_BRANDS
+    state_store.save(
+        "draft",
+        draft.id,
+        {
+            "draft": draft.model_dump(mode="json"),
+            "constraints": constraints.model_dump(mode="json"),
+        },
     )
 
 
-async def read_uploaded_image(
-    image: UploadFile | None,
-) -> tuple[bytes | None, str]:
-    if image is None:
-        return None, "image/jpeg"
-    image_type = (image.content_type or "").casefold()
-    if image_type not in ALLOWED_IMAGE_TYPES:
-        raise HTTPException(
-            status_code=415,
-            detail="Upload a JPG, PNG, WebP, HEIC, or HEIF image.",
-        )
-    image_bytes = await image.read()
-    if len(image_bytes) > 12 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="The image must be smaller than 12 MB.")
-    if not image_bytes:
-        raise HTTPException(status_code=422, detail="The uploaded image is empty.")
-    unreadable = HTTPException(
-        status_code=422, detail="The uploaded file is not a readable image."
-    )
-    if image_type in {"image/heic", "image/heif"}:
-        # Pillow cannot decode HEIC without a plugin, so the container is
-        # checked directly: an ISO base-media "ftyp" box whose brand is one the
-        # format actually uses. Weaker than a decode, but it stops arbitrary
-        # bytes reaching the OCR subprocess behind a declared content type.
-        if not _is_heif_container(image_bytes):
-            raise unreadable
-    else:
-        try:
-            with Image.open(BytesIO(image_bytes)) as decoded:
-                decoded.verify()
-        except (OSError, SyntaxError, UnidentifiedImageError) as exc:
-            raise unreadable from exc
-    return image_bytes, image_type
+def recalled_draft(draft_id: str) -> tuple[DraftCart, CartConstraints] | None:
+    draft = DRAFTS.get(draft_id)
+    if draft is not None:
+        return draft, DRAFT_CONSTRAINTS.get(draft_id, CartConstraints())
+    payload = state_store.load("draft", draft_id)
+    if payload is None:
+        return None
+    try:
+        draft = DraftCart.model_validate(payload["draft"])
+        constraints = CartConstraints.model_validate(payload.get("constraints", {}))
+    except (KeyError, TypeError, ValueError):
+        state_store.delete("draft", draft_id)
+        return None
+    DRAFTS[draft.id] = draft
+    DRAFT_CONSTRAINTS[draft.id] = constraints
+    return draft, constraints
 
 
 async def prepare_plan(
@@ -177,6 +134,33 @@ async def prepare_plan(
     use_cloud: bool = False,
 ) -> CartPlan:
     """Build a plan and apply the configured recognition decision policy."""
+    started = time.perf_counter()
+
+    def observed(result: CartPlan) -> CartPlan:
+        needs_review = sum(item.needs_review for item in result.items)
+        TELEMETRY.record(
+            "recognition",
+            stage=settings.recognition_policy,
+            outcome="review_required" if needs_review else "ready",
+            duration_ms=(time.perf_counter() - started) * 1000,
+            item_count=len(result.items),
+        )
+        return result
+
+    if image_bytes and image_type not in {"image/heic", "image/heif"}:
+        quality = await asyncio.to_thread(analyze_image_quality, image_bytes)
+        TELEMETRY.record(
+            "image_quality",
+            stage="preflight",
+            outcome=quality.status,
+        )
+        if quality.status == "retake":
+            guidance = " ".join(quality.guidance[:2])
+            raise ValueError(
+                "This photo is too difficult to read safely. "
+                f"{guidance or 'Retake it in brighter, steadier conditions.'}"
+            )
+
     plan = await asyncio.to_thread(
         plan_cart,
         text=text,
@@ -186,7 +170,8 @@ async def prepare_plan(
     )
     uncertain = image_bytes and any(item.needs_review for item in plan.items)
     if not uncertain:
-        return plan
+        return observed(plan)
+    assert image_bytes is not None
 
     if settings.recognition_policy == "autonomous_safe":
         local_plan = plan.model_copy(deep=True)
@@ -239,16 +224,18 @@ async def prepare_plan(
                 "segmented row was uncertain.",
             )
         resolved.processing_note += cloud_note
-        return resolved
+        return observed(resolved)
 
     if use_cloud:
-        return await asyncio.to_thread(
-            retry_uncertain_with_cloud,
-            plan=plan,
-            image_bytes=image_bytes,
-            settings=settings,
+        return observed(
+            await asyncio.to_thread(
+                retry_uncertain_with_cloud,
+                plan=plan,
+                image_bytes=image_bytes,
+                settings=settings,
+            )
         )
-    return plan
+    return observed(plan)
 
 
 @app.get("/api/health")
@@ -283,7 +270,42 @@ async def health() -> dict[str, object]:
         "cloud_model_id": settings.cloud_model if settings.cloud_backend else "",
         "recognition_policy": settings.recognition_policy,
         "model_id": settings.planner_model,
+        "state_recovery": True,
     }
+
+
+@app.get("/api/diagnostics")
+async def diagnostics() -> dict[str, object]:
+    """Local reliability data containing no queries, products, or cart content."""
+    return {
+        "provider_search": SEARCH_CACHE.diagnostics(),
+        "telemetry": TELEMETRY.snapshot(),
+    }
+
+
+@app.post("/api/images/quality", response_model=ImageQualityReport)
+async def image_quality(
+    image: UploadFile = File(...),
+) -> ImageQualityReport:
+    image_bytes, image_type = await read_uploaded_image(image)
+    assert image_bytes is not None
+    if image_type in {"image/heic", "image/heif"}:
+        report = ImageQualityReport(
+            status="usable",
+            score=0.5,
+            issues=["analysis_unavailable"],
+            guidance=[
+                "HEIC quality will be checked during on-device recognition."
+            ],
+        )
+    else:
+        report = await asyncio.to_thread(analyze_image_quality, image_bytes)
+    TELEMETRY.record(
+        "image_quality",
+        stage="preflight",
+        outcome=report.status,
+    )
+    return report
 
 
 @app.get("/tokens.css", include_in_schema=False)
@@ -603,8 +625,9 @@ async def create_draft_stream(
                     )
                     add_results = await draft_provider.add_items(
                         [
-                            (item.selected_product, item.units_to_add)
+                            (product, item.units_to_add)
                             for item in selected_items
+                            if (product := item.selected_product) is not None
                         ],
                         operation_id=draft.id,
                     )
@@ -648,9 +671,10 @@ async def create_draft_stream(
 
 @app.post("/api/search")
 async def research_item(request: SearchRequest) -> DraftItem:
-    draft = DRAFTS.get(request.draft_id)
-    if not draft:
+    recalled = recalled_draft(request.draft_id)
+    if not recalled:
         raise HTTPException(status_code=404, detail="Draft cart not found. Create a new draft.")
+    draft, constraints = recalled
     item = next(
         (entry for entry in draft.items if entry.planned.id == request.planned_item_id),
         None,
@@ -671,7 +695,6 @@ async def research_item(request: SearchRequest) -> DraftItem:
     item.units_to_add = decision.units_to_add
     item.reason = decision.reason
     item.flags = []
-    constraints = DRAFT_CONSTRAINTS.get(draft.id, CartConstraints())
     refreshed = enforce_constraints(
         draft.items,
         constraints,
@@ -686,9 +709,10 @@ async def research_item(request: SearchRequest) -> DraftItem:
 
 @app.post("/api/confirm", response_model=ConfirmResponse)
 async def confirm_cart(request: ConfirmRequest) -> ConfirmResponse:
-    draft = DRAFTS.get(request.draft_id)
-    if not draft:
+    recalled = recalled_draft(request.draft_id)
+    if not recalled:
         raise HTTPException(status_code=404, detail="Draft cart not found. Create a new draft.")
+    draft, _ = recalled
     draft_provider = get_provider(draft.provider_id or None)
     mutations_allowed = provider_mutations_allowed(draft_provider)
     if settings.auto_add_to_cart and mutations_allowed:
@@ -779,7 +803,7 @@ async def estimate_comparison(
 async def verified_comparison_preflight(
     proposal_id: str,
 ) -> ComparisonPreflight:
-    proposal = comparison_service.proposals.get(proposal_id)
+    proposal = comparison_service.get_proposal(proposal_id)
     if proposal is None:
         raise HTTPException(status_code=404, detail="Comparison proposal not found.")
     return await comparison_service.preflight(
@@ -825,7 +849,7 @@ async def verify_comparison(
     response_model=ComparisonOperation,
 )
 async def get_comparison(operation_id: str) -> ComparisonOperation:
-    operation = comparison_service.operations.get(operation_id)
+    operation = comparison_service.get_operation(operation_id)
     if operation is None:
         raise HTTPException(status_code=404, detail="Comparison operation not found.")
     return operation

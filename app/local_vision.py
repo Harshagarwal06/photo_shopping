@@ -9,13 +9,13 @@ from dataclasses import dataclass, field
 from io import BytesIO
 from itertools import product
 from pathlib import Path
+from typing import cast
 
 from PIL import Image, ImageOps, ImageStat
 
 from .llm import ModelBackendError
 from .models import CartConstraints, CartPlan, PlannedItem
 from .ocr_fixture_repairs import apply_fixture_repairs
-
 
 VISION_SCRIPT = Path(__file__).with_name("vision_ocr.swift")
 # Illegible writing is read as confidently-wrong words, and those become real
@@ -336,7 +336,7 @@ def _projection_score(image: Image.Image, angle: float) -> int:
         fillcolor=255,
     )
     width, height = rotated.size
-    pixels = list(rotated.get_flattened_data())
+    pixels = cast(tuple[float, ...], rotated.get_flattened_data())
     rows = [
         sum(1 for value in pixels[y * width : (y + 1) * width] if value < 190)
         for y in range(height)
@@ -1070,7 +1070,6 @@ def plan_locally(
     readable = [line for line in photo_lines if line.confidence >= MIN_LINE_CONFIDENCE]
     skipped = len(photo_lines) - len(readable)
     photo_text = "\n".join(line.text for line in readable)
-    origin = "both" if text.strip() and photo_text else "photo" if photo_text else "text"
     combined = "\n".join(part for part in (text.strip(), photo_text) if part)
     budget = _budget_amount(BUDGET_RE.search(combined))
 

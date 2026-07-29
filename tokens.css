@@ -25,9 +25,9 @@
   --color-shadow: oklch(20% 0.012 250 / 0.12);
   --color-shadow-deep: oklch(20% 0.012 250 / 0.2);
 
-  --font-display: "Plus Jakarta Sans", "Avenir Next", sans-serif;
-  --font-body: "Plus Jakarta Sans", "Avenir Next", sans-serif;
-  --font-label: "JetBrains Mono", "SFMono-Regular", monospace;
+  --font-display: "Avenir Next", "Segoe UI", sans-serif;
+  --font-body: "Avenir Next", "Segoe UI", sans-serif;
+  --font-label: "SFMono-Regular", "Cascadia Mono", "Roboto Mono", monospace;
 
   --text-xs: 0.75rem;
   --text-sm: 0.875rem;
@@ -73,4 +73,3 @@
   --z-toast: 500;
   --z-tooltip: 600;
 }
-

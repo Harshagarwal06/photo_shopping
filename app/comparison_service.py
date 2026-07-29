@@ -7,6 +7,7 @@ import secrets
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
+from typing import Literal
 from uuid import uuid4
 
 from .compare import build_outcome, estimated_summary, rank
@@ -25,6 +26,8 @@ from .models import (
 )
 from .orchestrator import run_comparison
 from .providers.base import GroceryProvider
+from .state_store import SQLiteStateStore
+from .telemetry import TELEMETRY
 
 
 @dataclass
@@ -39,19 +42,64 @@ class ComparisonService:
         self,
         providers: dict[str, GroceryProvider],
         settings: Settings,
+        state_store: SQLiteStateStore | None = None,
     ):
         self.providers = providers
         self.settings = settings
+        self.state_store = state_store
         self.proposals: OrderedDict[str, ComparisonProposal] = OrderedDict()
         self.operations: OrderedDict[str, ComparisonOperation] = OrderedDict()
         self._confirmations: OrderedDict[str, _Confirmation] = OrderedDict()
         self._lock = asyncio.Lock()
 
-    def _remember(self, store: OrderedDict, key: str, value) -> None:
+    def _remember(
+        self,
+        store: OrderedDict,
+        key: str,
+        value,
+        *,
+        persistent_kind: str | None = None,
+    ) -> None:
         store[key] = value
         store.move_to_end(key)
         while len(store) > self.settings.max_state_records:
             store.popitem(last=False)
+        if persistent_kind and self.state_store is not None:
+            self.state_store.save(
+                persistent_kind,
+                key,
+                value.model_dump(mode="json"),
+            )
+
+    def get_proposal(self, proposal_id: str) -> ComparisonProposal | None:
+        proposal = self.proposals.get(proposal_id)
+        if proposal is not None or self.state_store is None:
+            return proposal
+        payload = self.state_store.load("comparison_proposal", proposal_id)
+        if payload is None:
+            return None
+        try:
+            proposal = ComparisonProposal.model_validate(payload)
+        except ValueError:
+            self.state_store.delete("comparison_proposal", proposal_id)
+            return None
+        self._remember(self.proposals, proposal_id, proposal)
+        return proposal
+
+    def get_operation(self, operation_id: str) -> ComparisonOperation | None:
+        operation = self.operations.get(operation_id)
+        if operation is not None or self.state_store is None:
+            return operation
+        payload = self.state_store.load("comparison_operation", operation_id)
+        if payload is None:
+            return None
+        try:
+            operation = ComparisonOperation.model_validate(payload)
+        except ValueError:
+            self.state_store.delete("comparison_operation", operation_id)
+            return None
+        self._remember(self.operations, operation_id, operation)
+        return operation
 
     def _purge_expired_confirmations(self) -> None:
         now = time.monotonic()
@@ -135,7 +183,7 @@ class ComparisonService:
         self,
         provider_ids: list[str],
         *,
-        mode: str,
+        mode: Literal["estimated", "verified"],
         proposal_id: str | None = None,
     ) -> ComparisonPreflight:
         selected = self._selected(provider_ids)
@@ -167,7 +215,7 @@ class ComparisonService:
         token: str | None = None
         if mode == "verified" and can_continue and proposal_id:
             self._purge_expired_confirmations()
-            proposal = self.proposals.get(proposal_id)
+            proposal = self.get_proposal(proposal_id)
             expected = tuple(proposal.provider_ids) if proposal else ()
             requested = tuple(eligible)
             if proposal is not None and requested == expected:
@@ -185,6 +233,12 @@ class ComparisonService:
                     ),
                 )
                 proposal.frozen = True
+                if self.state_store is not None:
+                    self.state_store.save(
+                        "comparison_proposal",
+                        proposal.id,
+                        proposal.model_dump(mode="json"),
+                    )
             else:
                 can_continue = False
 
@@ -201,6 +255,7 @@ class ComparisonService:
         plan: CartPlan,
         provider_ids: list[str],
     ) -> ComparisonProposal:
+        started = time.perf_counter()
         selected = self._selected(provider_ids)
         preflight = await self.preflight(provider_ids, mode="estimated")
         eligible_ids = [
@@ -250,7 +305,19 @@ class ComparisonService:
             provider_ids=eligible_ids,
             drafts=drafts,
         )
-        self._remember(self.proposals, proposal.id, proposal)
+        self._remember(
+            self.proposals,
+            proposal.id,
+            proposal,
+            persistent_kind="comparison_proposal",
+        )
+        TELEMETRY.record(
+            "comparison",
+            stage="estimated",
+            outcome="ok",
+            duration_ms=(time.perf_counter() - started) * 1000,
+            item_count=len(plan.items),
+        )
         return proposal
 
     def override(
@@ -258,7 +325,7 @@ class ComparisonService:
         proposal_id: str,
         request: ProposalOverrideRequest,
     ) -> ComparisonProposal:
-        proposal = self.proposals.get(proposal_id)
+        proposal = self.get_proposal(proposal_id)
         if proposal is None:
             raise ValueError("Comparison proposal not found.")
         draft = proposal.drafts.get(request.provider_id)
@@ -318,11 +385,20 @@ class ComparisonService:
         proposal.report = rank(outcomes, self.settings)
         proposal.report.estimated = True
         proposal.frozen = False
-        self._confirmations = {
-            token: confirmation
+        self._confirmations = OrderedDict(
+            (
+                token,
+                confirmation,
+            )
             for token, confirmation in self._confirmations.items()
             if confirmation.proposal_id != proposal_id
-        }
+        )
+        if self.state_store is not None:
+            self.state_store.save(
+                "comparison_proposal",
+                proposal.id,
+                proposal.model_dump(mode="json"),
+            )
         return proposal
 
     async def verify(
@@ -330,6 +406,7 @@ class ComparisonService:
         proposal_id: str,
         confirmation_token: str,
     ) -> ComparisonOperation:
+        started = time.perf_counter()
         async with self._lock:
             confirmation = self._confirmations.pop(confirmation_token, None)
             if (
@@ -338,7 +415,7 @@ class ComparisonService:
                 or confirmation.expires_at < time.monotonic()
             ):
                 raise ValueError("The verified-comparison confirmation is invalid or expired.")
-            proposal = self.proposals.get(proposal_id)
+            proposal = self.get_proposal(proposal_id)
             if proposal is None:
                 raise ValueError("Comparison proposal not found.")
             if not proposal.frozen:
@@ -400,7 +477,19 @@ class ComparisonService:
                 provider_ids=list(confirmation.provider_ids),
                 report=report,
             )
-            self._remember(self.operations, operation.id, operation)
+            self._remember(
+                self.operations,
+                operation.id,
+                operation,
+                persistent_kind="comparison_operation",
+            )
+            TELEMETRY.record(
+                "comparison",
+                stage="verified",
+                outcome="ok",
+                duration_ms=(time.perf_counter() - started) * 1000,
+                item_count=len(proposal.plan.items),
+            )
             return operation
 
     async def choose(
@@ -408,7 +497,7 @@ class ComparisonService:
         operation_id: str,
         request: ComparisonChoiceRequest,
     ) -> ComparisonOperation:
-        operation = self.operations.get(operation_id)
+        operation = self.get_operation(operation_id)
         if operation is None:
             raise ValueError("Comparison operation not found.")
         if operation.status in {"cleaned", "cleanup_failed"} and operation.cleanup:
@@ -418,6 +507,12 @@ class ComparisonService:
         if request.action == "keep_all":
             operation.winner = winner
             operation.status = "completed"
+            if self.state_store is not None:
+                self.state_store.save(
+                    "comparison_operation",
+                    operation.id,
+                    operation.model_dump(mode="json"),
+                )
             return operation
 
         targets = list(operation.provider_ids)
@@ -459,4 +554,10 @@ class ComparisonService:
         operation.status = (
             "cleaned" if all(outcome.success for outcome in cleanup) else "cleanup_failed"
         )
+        if self.state_store is not None:
+            self.state_store.save(
+                "comparison_operation",
+                operation.id,
+                operation.model_dump(mode="json"),
+            )
         return operation

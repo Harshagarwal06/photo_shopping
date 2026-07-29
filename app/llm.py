@@ -64,7 +64,7 @@ class HFModelClient:
             raise ModelBackendError(
                 "HF_TOKEN is missing. Add it to .env before planning a cart."
             )
-        provider = None if settings.hf_provider == "auto" else settings.hf_provider
+        provider: Any = None if settings.hf_provider == "auto" else settings.hf_provider
         self._client = InferenceClient(token=settings.hf_token, provider=provider)
 
     def complete_json(
@@ -88,13 +88,15 @@ class HFModelClient:
                 },
             ]
         try:
+            messages: Any = [
+                {"role": "system", "content": system},
+                {"role": "user", "content": content},
+            ]
+            response_format: Any = {"type": "json_object"}
             response = self._client.chat_completion(
                 model=model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": content},
-                ],
-                response_format={"type": "json_object"},
+                messages=messages,
+                response_format=response_format,
                 temperature=0.1,
                 max_tokens=max_tokens,
             )

@@ -1,4 +1,3 @@
-import pytest
 
 from app.providers.base import CartLine, CartSummary, FeeLine
 

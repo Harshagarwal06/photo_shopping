@@ -1,0 +1,28 @@
+{
+  "dataset": "held-out-handwriting-v1",
+  "notes": "Keep these photographs outside tests/fixtures and never add literal repair rules from them.",
+  "cases": [
+    {
+      "id": "writer-01-kitchen-list",
+      "image": "../private-evaluation/writer-01-kitchen-list.jpg",
+      "media_type": "image/jpeg",
+      "tuned_against": false,
+      "expected": [
+        {
+          "raw_text": "Amul milk 2 litres",
+          "search_term": "milk",
+          "context": "Amul",
+          "quantity": 2,
+          "unit": "l"
+        },
+        {
+          "raw_text": "eggs 12",
+          "search_term": "eggs",
+          "context": "",
+          "quantity": 12,
+          "unit": "count"
+        }
+      ]
+    }
+  ]
+}

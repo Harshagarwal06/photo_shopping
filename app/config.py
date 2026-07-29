@@ -1,11 +1,9 @@
 from functools import lru_cache
 from pathlib import Path
-
 from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -64,9 +62,22 @@ class Settings(BaseSettings):
     eta_tiebreak_rupees: float = Field(default=20.0, ge=0)
     comparison_confirmation_ttl_seconds: int = Field(default=300, ge=30, le=1800)
     max_state_records: int = Field(default=200, ge=10, le=5000)
+    state_db_path: Path = ROOT / ".photo_shopping_state.sqlite3"
+    state_record_ttl_seconds: int = Field(default=86_400, ge=300, le=2_592_000)
+    telemetry_retention_seconds: int = Field(
+        default=604_800, ge=3_600, le=7_776_000
+    )
     # Long enough to cover recognition searching a query and the draft or
     # comparison run searching it again moments later. 0 disables the cache.
     search_cache_ttl_seconds: float = Field(default=90.0, ge=0, le=900)
+    search_provider_min_interval_seconds: float = Field(default=0.25, ge=0, le=10)
+    search_retry_attempts: int = Field(default=3, ge=1, le=6)
+    search_retry_base_delay_seconds: float = Field(default=0.4, ge=0, le=30)
+    search_retry_jitter_ratio: float = Field(default=0.2, ge=0, le=1)
+    search_circuit_breaker_failures: int = Field(default=3, ge=1, le=20)
+    search_circuit_breaker_cooldown_seconds: float = Field(
+        default=30.0, ge=1, le=900
+    )
     order_history_limit: int = Field(default=5, ge=0, le=20)
     search_result_limit: int = Field(default=5, ge=1, le=10)
     navigation_timeout_ms: int = Field(default=30_000, ge=5_000)
@@ -78,6 +89,12 @@ class Settings(BaseSettings):
     @property
     def matcher_model(self) -> str:
         return self.matcher_model_id or self.model_id
+
+    @property
+    def resolved_state_db_path(self) -> Path:
+        if self.state_db_path.is_absolute():
+            return self.state_db_path
+        return ROOT / self.state_db_path
 
     @property
     def cloud_backend(self) -> Literal["hf", "nvidia", "groq"] | None:

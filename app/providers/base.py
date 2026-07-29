@@ -7,12 +7,12 @@ from pydantic import BaseModel, Field
 
 from ..models import (
     AddResult,
-    CartLine,
     CartSummary,
-    FeeLine,
     Product,
     ProviderCapabilities,
 )
+from ..models import CartLine as CartLine
+from ..models import FeeLine as FeeLine
 
 
 class ProviderError(RuntimeError):

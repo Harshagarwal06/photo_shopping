@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Protocol
 
 import keyring
-from keyring.errors import KeyringError
+from keyring.errors import KeyringError, PasswordDeleteError
 from pydantic import BaseModel
 
 from .base import ProviderError
@@ -57,7 +57,7 @@ class KeyringTokenStore:
     def delete(self) -> None:
         try:
             keyring.delete_password(self.service, self.account)
-        except keyring.errors.PasswordDeleteError:
+        except PasswordDeleteError:
             return
         except KeyringError as exc:
             raise ProviderError("The Instamart Keychain session could not be removed.") from exc

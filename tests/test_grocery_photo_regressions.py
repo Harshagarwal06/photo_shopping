@@ -8,7 +8,6 @@ import pytest
 
 from app.local_vision import plan_locally
 
-
 FIXTURES = Path(__file__).parent / "fixtures"
 requires_vision = pytest.mark.skipif(
     sys.platform != "darwin" or shutil.which("swift") is None,

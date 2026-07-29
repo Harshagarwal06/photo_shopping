@@ -12,7 +12,6 @@ from mcp.types import TextContent
 from .base import ProviderAuthError, ProviderError, ProviderSafetyError
 from .instamart_oauth import SwiggyOAuthClient
 
-
 ALLOWED_INSTAMART_TOOLS = frozenset(
     {
         "get_addresses",

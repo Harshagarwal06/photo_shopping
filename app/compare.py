@@ -6,6 +6,8 @@ number and reason here is traceable to a rule.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from .config import Settings
 from .models import (
     CartLine,
@@ -17,7 +19,6 @@ from .models import (
     Substitution,
 )
 from .units import fill_ratio, per_unit_price
-
 
 # Fees used only when cart writes are disabled and we cannot read a real cart.
 FEE_ESTIMATES: dict[str, list[FeeLine]] = {
@@ -63,7 +64,7 @@ def build_outcome(
     summary: CartSummary | None,
     settings: Settings,
     *,
-    status: str = "ok",
+    status: Literal["ok", "not_connected", "unavailable", "failed"] = "ok",
     error: str = "",
 ) -> PlatformOutcome:
     """Fold a platform's draft and cart summary into a comparable outcome."""
@@ -137,6 +138,16 @@ def _rankable(outcome: PlatformOutcome) -> bool:
     )
 
 
+def _summary(outcome: PlatformOutcome) -> CartSummary:
+    assert outcome.summary is not None
+    return outcome.summary
+
+
+def _eta(outcome: PlatformOutcome) -> int:
+    eta = _summary(outcome).delivery_eta_minutes
+    return eta if eta is not None else 10**6
+
+
 def rank(outcomes: list[PlatformOutcome], settings: Settings) -> ComparisonReport:
     """Rank platforms lexicographically: coverage tier, then real total, then ETA."""
     reasons: list[str] = []
@@ -163,7 +174,7 @@ def rank(outcomes: list[PlatformOutcome], settings: Settings) -> ComparisonRepor
 
     ordered = sorted(
         rankable,
-        key=lambda outcome: (outcome.coverage_tier, round(outcome.summary.total, 2)),
+        key=lambda outcome: (outcome.coverage_tier, round(_summary(outcome).total, 2)),
     )
 
     # ETA tiebreak: within the price band, prefer the faster platform.
@@ -172,17 +183,13 @@ def rank(outcomes: list[PlatformOutcome], settings: Settings) -> ComparisonRepor
         outcome
         for outcome in ordered
         if outcome.coverage_tier == best.coverage_tier
-        and round(outcome.summary.total, 2) - round(best.summary.total, 2)
+        and round(_summary(outcome).total, 2) - round(_summary(best).total, 2)
         <= settings.eta_tiebreak_rupees
     ]
     if len(band) > 1:
         fastest = min(
             band,
-            key=lambda outcome: (
-                outcome.summary.delivery_eta_minutes
-                if outcome.summary.delivery_eta_minutes is not None
-                else 10**6
-            ),
+            key=_eta,
         )
         if fastest is not best:
             ordered.remove(fastest)
@@ -195,7 +202,7 @@ def rank(outcomes: list[PlatformOutcome], settings: Settings) -> ComparisonRepor
 
     if len(ordered) > 1:
         runner_up = ordered[1]
-        gap = round(runner_up.summary.total - best.summary.total, 2)
+        gap = round(_summary(runner_up).total - _summary(best).total, 2)
         if gap > 0:
             reasons.append(
                 f"{best.display_name} is ₹{gap:g} cheaper than {runner_up.display_name}."

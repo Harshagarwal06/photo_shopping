@@ -14,7 +14,6 @@ import pytest
 
 from app.local_vision import recognize_text
 
-
 FIXTURES = Path(__file__).parent / "fixtures"
 EXPECTED = ["Water Bottle", "Coke Can", "black pen", "Coffee"]
 

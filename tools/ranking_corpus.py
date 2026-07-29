@@ -26,7 +26,6 @@ from app.config import get_settings
 from app.matcher import match_product
 from app.models import PlannedItem, Product
 
-
 CORPUS_PATH = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "ranking_corpus.json"
 # Long enough to stay under the rate limit that answers a rapid seventh search
 # with an empty page. See SEARCH_RETRY_DELAYS_MS in app/blinkit.py.

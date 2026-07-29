@@ -31,7 +31,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-
 MAX_FIXTURE_REPAIRS = 30
 
 

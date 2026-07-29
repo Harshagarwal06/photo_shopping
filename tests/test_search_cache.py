@@ -6,6 +6,7 @@ import asyncio
 import pytest
 
 from app.models import Product
+from app.providers.base import ProviderAuthError, ProviderError
 from app.search_cache import ProviderSearchCache
 
 
@@ -157,3 +158,121 @@ def test_the_cache_stays_bounded():
     asyncio.run(run())
 
     assert provider.calls.count("query 0") == 2
+
+
+def test_identical_concurrent_queries_are_coalesced():
+    cache = ProviderSearchCache()
+
+    class SlowProvider(CountingProvider):
+        async def search(self, query: str) -> list[Product]:
+            await asyncio.sleep(0.01)
+            return await super().search(query)
+
+    provider = SlowProvider()
+
+    async def run():
+        return await asyncio.gather(
+            cache.search(provider, "milk", ttl_seconds=90),
+            cache.search(provider, " milk ", ttl_seconds=90),
+            cache.search(provider, "MILK", ttl_seconds=90),
+        )
+
+    results = asyncio.run(run())
+
+    assert provider.calls == ["milk"]
+    assert len(results) == 3
+    assert results[0] == results[1] == results[2]
+
+
+def test_transient_provider_errors_are_retried():
+    cache = ProviderSearchCache()
+
+    class FailingTwice(CountingProvider):
+        async def search(self, query: str) -> list[Product]:
+            self.calls.append(query)
+            if len(self.calls) < 3:
+                raise ProviderError("temporarily throttled")
+            return [
+                Product(
+                    id="recovered",
+                    name="Milk",
+                    pack_size="1 L",
+                    price=60,
+                    handle="milk",
+                )
+            ]
+
+    provider = FailingTwice()
+
+    result = asyncio.run(
+        cache.search(
+            provider,
+            "milk",
+            ttl_seconds=90,
+            retry_attempts=3,
+            retry_base_delay_seconds=0,
+        )
+    )
+
+    assert [product.id for product in result] == ["recovered"]
+    assert provider.calls == ["milk", "milk", "milk"]
+
+
+def test_authentication_errors_are_never_retried():
+    cache = ProviderSearchCache()
+
+    class LoggedOut(CountingProvider):
+        async def search(self, query: str) -> list[Product]:
+            self.calls.append(query)
+            raise ProviderAuthError("reconnect")
+
+    provider = LoggedOut()
+
+    with pytest.raises(ProviderAuthError, match="reconnect"):
+        asyncio.run(
+            cache.search(
+                provider,
+                "milk",
+                ttl_seconds=90,
+                retry_attempts=3,
+            )
+        )
+
+    assert provider.calls == ["milk"]
+
+
+def test_circuit_breaker_pauses_a_repeatedly_failing_provider(monkeypatch):
+    cache = ProviderSearchCache()
+    clock = [1000.0]
+    monkeypatch.setattr("app.search_cache.time.monotonic", lambda: clock[0])
+
+    class DownProvider(CountingProvider):
+        async def search(self, query: str) -> list[Product]:
+            self.calls.append(query)
+            raise ProviderError("provider down")
+
+    provider = DownProvider()
+
+    async def run():
+        for query in ("milk", "eggs"):
+            with pytest.raises(ProviderError, match="provider down"):
+                await cache.search(
+                    provider,
+                    query,
+                    ttl_seconds=0,
+                    circuit_breaker_failures=2,
+                    circuit_breaker_cooldown_seconds=30,
+                )
+        with pytest.raises(ProviderError, match="temporarily paused"):
+            await cache.search(
+                provider,
+                "bread",
+                ttl_seconds=0,
+                circuit_breaker_failures=2,
+                circuit_breaker_cooldown_seconds=30,
+            )
+
+    asyncio.run(run())
+
+    assert provider.calls == ["milk", "eggs"]
+    assert cache.diagnostics()["blinkit"]["circuit_open"] is True

@@ -18,7 +18,6 @@ from app.config import Settings
 from app.matcher import match_product
 from app.models import PlannedItem, Product
 
-
 CORPUS = json.loads(
     (Path(__file__).parent / "fixtures" / "ranking_corpus.json").read_text(
         encoding="utf-8"

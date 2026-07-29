@@ -5,10 +5,9 @@ from io import BytesIO
 from PIL import Image
 
 from .config import Settings
-from .local_vision import plan_locally
 from .llm import GroqModelClient, HFModelClient, ModelBackendError, NvidiaModelClient
+from .local_vision import plan_locally
 from .models import CartPlan
-
 
 PLANNER_SYSTEM = """You are the planning stage of a personal Indian grocery-cart assistant.
 Return only valid JSON. Read English, Hindi (Devanagari), and Hinglish. Convert grocery
@@ -53,46 +52,6 @@ def _hosted_client(settings: Settings):
     if settings.model_backend == "nvidia":
         return NvidiaModelClient(settings)
     return HFModelClient(settings)
-
-
-def _demo_plan(text: str) -> CartPlan:
-    # Explicit demo data keeps local UI testing possible without sending data anywhere.
-    lowered = text.lower()
-    budget = 800 if "800" in lowered else None
-    payload = {
-        "items": [
-            {
-                "search_term": "milk",
-                "context": "regular dairy milk",
-                "quantity": 2,
-                "unit": "l",
-                "raw_text": "doodh 2L",
-                "source": "text",
-            },
-            {
-                "search_term": "eggs",
-                "context": "chicken eggs",
-                "quantity": 12,
-                "unit": "count",
-                "raw_text": "12 ande",
-                "source": "text",
-            },
-            {
-                "search_term": "dishwashing liquid",
-                "context": "prefer lowest total price",
-                "quantity": 1,
-                "unit": "pack",
-                "raw_text": "dish soap",
-                "source": "text",
-            },
-        ],
-        "constraints": {
-            "cart_budget": budget,
-            "item_caps": {},
-            "preferences": ["cheapest dish soap"],
-        },
-    }
-    return CartPlan.model_validate(payload)
 
 
 def _uncertain_crop_sheet(image_bytes: bytes, plan: CartPlan) -> tuple[bytes, list]:
@@ -329,7 +288,14 @@ def plan_cart(
     if not text.strip() and not image_bytes:
         raise ValueError("Add a photo, a typed request, or both.")
     if settings.demo_mode:
-        return _demo_plan(text)
+        # Demo mode mocks only the grocery provider. Parsing the user's actual
+        # request keeps the preview honest and exercises the same local planning
+        # path used when hosted inference is unavailable.
+        return plan_locally(
+            text=text,
+            image_bytes=image_bytes,
+            image_media_type=image_media_type,
+        )
     if settings.model_backend == "local":
         return plan_locally(
             text=text,
