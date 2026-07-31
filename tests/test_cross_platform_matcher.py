@@ -123,6 +123,156 @@ def test_one_provider_uses_the_normal_single_cart_pick():
     assert result.picks["blinkit"].product_id == "one"
 
 
+def test_exact_product_variant_wins_before_cheaper_mixed_brands():
+    item = PlannedItem(search_term="toor dal", quantity=1, unit="item")
+    result = match_across_platforms(
+        item,
+        {
+            "blinkit": [
+                _product("b-cheap", "Whole Farm Grocery Toor Dal", "1 kg", 150.0),
+                _product(
+                    "b-exact", "Tata Sampann Unpolished Toor Dal/Arhar Dal", "1 kg", 171.0
+                ),
+            ],
+            "instamart": [
+                _product("i-cheap", "Basic Toor Dal", "1 kg", 147.0),
+                _product(
+                    "i-exact", "Tata Sampann Unpolished Toor/Arhar Dal", "1 kg", 186.0
+                ),
+            ],
+            "zepto": [
+                _product("z-cheap", "Daily Good Toor Dal Regular", "1 kg", 149.0),
+                _product(
+                    "z-exact", "Tata Sampann Unpolished Toor Dal/Arhar Dal", "1 kg", 171.0
+                ),
+            ],
+        },
+        _settings(),
+    )
+
+    assert {pick.product_id for pick in result.picks.values()} == {
+        "b-exact",
+        "i-exact",
+        "z-exact",
+    }
+    assert "same product/variant" in result.equivalence_note.lower()
+
+
+def test_common_brand_wins_when_exact_variant_is_not_shared():
+    item = PlannedItem(search_term="atta", quantity=1, unit="item")
+    result = match_across_platforms(
+        item,
+        {
+            "blinkit": [
+                _product("b-cheap", "Organic Tattva Wheat Organic Atta", "1 kg", 63.0),
+                _product("b-brand", "Aashirvaad Organic Atta", "1 kg", 65.0),
+            ],
+            "instamart": [
+                _product("i-cheap", "Nature Fresh MP Superior Atta", "1 kg", 60.0),
+                _product("i-brand", "Aashirvaad Multigrains Atta", "1 kg", 74.0),
+            ],
+            "zepto": [
+                _product("z-cheap", "Daily Good Sharbati Atta", "1 kg", 49.0),
+                _product("z-brand", "Aashirvaad High Fibre Atta", "1 kg", 78.0),
+            ],
+        },
+        _settings(),
+    )
+
+    assert {pick.product_id for pick in result.picks.values()} == {
+        "b-brand",
+        "i-brand",
+        "z-brand",
+    }
+    assert "same aashirvaad brand" in result.equivalence_note.lower()
+
+
+def test_common_brand_prefers_closest_shared_variant_before_price_or_position():
+    item = PlannedItem(search_term="rice", quantity=1, unit="item")
+    result = match_across_platforms(
+        item,
+        {
+            "blinkit": [
+                _product(
+                    "b-super",
+                    "Daawat Rozana-Super Basmati Rice (Medium Grain)",
+                    "1 kg",
+                    93.0,
+                )
+            ],
+            "instamart": [
+                _product(
+                    "i-super", "Daawat Basmati Rice - Rozana Super", "1 kg", 90.0
+                )
+            ],
+            "zepto": [
+                _product(
+                    "z-gold",
+                    "Daawat Rozana Basmati Rice Gold | Medium Grain",
+                    "1 kg",
+                    92.0,
+                ),
+                _product(
+                    "z-super",
+                    "Daawat Rozana Super Basmati Rice | Medium Grain",
+                    "1 kg",
+                    93.0,
+                ),
+            ],
+        },
+        _settings(),
+    )
+
+    assert result.picks["zepto"].product_id == "z-super"
+
+
+def test_price_breaks_ties_only_after_exact_equivalence_is_established():
+    item = PlannedItem(search_term="toor dal", quantity=1, unit="item")
+    result = match_across_platforms(
+        item,
+        {
+            "blinkit": [
+                _product("b-tata", "Tata Sampann Toor Dal", "1 kg", 171.0),
+                _product("b-fortune", "Fortune Toor Dal", "1 kg", 160.0),
+            ],
+            "instamart": [
+                _product("i-tata", "Tata Sampann Toor Dal", "1 kg", 186.0),
+                _product("i-fortune", "Fortune Toor Dal", "1 kg", 164.0),
+            ],
+            "zepto": [
+                _product("z-tata", "Tata Sampann Toor Dal", "1 kg", 171.0),
+                _product("z-fortune", "Fortune Toor Dal", "1 kg", 162.0),
+            ],
+        },
+        _settings(),
+    )
+
+    assert {pick.product_id for pick in result.picks.values()} == {
+        "b-fortune",
+        "i-fortune",
+        "z-fortune",
+    }
+
+
+def test_different_brands_are_used_only_with_explicit_disclosure():
+    item = PlannedItem(search_term="toor dal", quantity=1, unit="item")
+    result = match_across_platforms(
+        item,
+        {
+            "blinkit": [_product("b1", "Whole Farm Grocery Toor Dal", "1 kg", 150.0)],
+            "instamart": [_product("i1", "Basic Toor Dal", "1 kg", 147.0)],
+            "zepto": [_product("z1", "Daily Good Toor Dal Regular", "1 kg", 149.0)],
+        },
+        _settings(),
+    )
+
+    assert "no common brand was available" in result.equivalence_note.lower()
+    assert all(
+        "no common brand was available" in pick.reason.lower()
+        for pick in result.picks.values()
+    )
+
+
 # --- Comparability: platforms must deliver the same amount, or none. ----------
 # A list written without quantities ("rajma") gives the matcher nothing to
 # verify against, so each platform used to pick its own best-value pack and the
@@ -241,6 +391,60 @@ def test_hosted_picks_at_unequal_amounts_are_rejected(monkeypatch):
     assert _delivered(result, "blinkit", blinkit) == _delivered(
         result, "instamart", instamart
     )
+
+
+def test_hosted_mixed_brand_picks_cannot_bypass_available_common_brand(monkeypatch):
+    candidates = {
+        "blinkit": [
+            _product("b-cheap", "Whole Farm Grocery Toor Dal", "1 kg", 150.0),
+            _product("b-common", "Tata Sampann Toor Dal", "1 kg", 171.0),
+        ],
+        "instamart": [
+            _product("i-cheap", "Basic Toor Dal", "1 kg", 147.0),
+            _product("i-common", "Tata Sampann Toor Dal", "1 kg", 186.0),
+        ],
+        "zepto": [
+            _product("z-cheap", "Daily Good Toor Dal", "1 kg", 149.0),
+            _product("z-common", "Tata Sampann Toor Dal", "1 kg", 171.0),
+        ],
+    }
+    monkeypatch.setattr(
+        "app.matcher.HFModelClient",
+        _fake_client_returning(
+            {
+                "picks": {
+                    "blinkit": {
+                        "product_id": "b-cheap",
+                        "units_to_add": 1,
+                        "reason": "cheapest",
+                    },
+                    "instamart": {
+                        "product_id": "i-cheap",
+                        "units_to_add": 1,
+                        "reason": "cheapest",
+                    },
+                    "zepto": {
+                        "product_id": "z-cheap",
+                        "units_to_add": 1,
+                        "reason": "cheapest",
+                    },
+                },
+                "equivalence_note": "All are toor dal.",
+            }
+        ),
+    )
+
+    result = match_across_platforms(
+        PlannedItem(search_term="toor dal", quantity=1, unit="item"),
+        candidates,
+        _llm_settings(),
+    )
+
+    assert {pick.product_id for pick in result.picks.values()} == {
+        "b-common",
+        "i-common",
+        "z-common",
+    }
 
 
 def test_unmeasurable_packs_still_match_independently():

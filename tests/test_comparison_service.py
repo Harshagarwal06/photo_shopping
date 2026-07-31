@@ -10,6 +10,7 @@ from app.models import (
     CartPlan,
     CartSummary,
     ComparisonChoiceRequest,
+    ContractConfirmRequest,
     PlannedItem,
     Product,
     ProposalOverrideRequest,
@@ -230,3 +231,56 @@ def test_in_memory_state_is_bounded_and_expired_confirmations_are_purged():
     service._purge_expired_confirmations()
 
     assert list(service._confirmations) == ["current"]
+
+
+def test_confirmed_contract_is_bound_to_proposal_and_receipt():
+    provider = FakeComparisonProvider("blinkit")
+    service = ComparisonService({"blinkit": provider}, _write_settings())
+    plan = _plan()
+    draft_contract = service.create_contract(plan)
+    contract = service.confirm_contract(
+        draft_contract.id,
+        ContractConfirmRequest(
+            version=draft_contract.version,
+            items=draft_contract.items,
+            cart_budget=200,
+        ),
+    )
+
+    proposal = asyncio.run(service.estimate(plan, ["blinkit"], contract))
+    receipt = service.proposal_receipt(proposal.id)
+
+    assert proposal.contract == contract
+    assert proposal.report.contract_fingerprint == contract.fingerprint
+    assert receipt is not None
+    assert receipt.contract_id == contract.id
+    assert receipt.platforms[0].proof is not None
+
+
+def test_contract_edit_invalidates_exact_total_confirmation():
+    provider = FakeComparisonProvider("blinkit")
+    service = ComparisonService({"blinkit": provider}, _write_settings())
+    plan = _plan()
+    draft_contract = service.create_contract(plan)
+    contract = service.confirm_contract(
+        draft_contract.id,
+        ContractConfirmRequest(
+            version=draft_contract.version,
+            items=draft_contract.items,
+        ),
+    )
+    proposal = asyncio.run(service.estimate(plan, ["blinkit"], contract))
+    preflight = asyncio.run(
+        service.preflight(["blinkit"], mode="verified", proposal_id=proposal.id)
+    )
+    service.confirm_contract(
+        contract.id,
+        ContractConfirmRequest(
+            version=contract.version,
+            items=contract.items,
+            cart_budget=250,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="contract changed"):
+        asyncio.run(service.verify(proposal.id, preflight.confirmation_token))

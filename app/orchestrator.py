@@ -16,6 +16,7 @@ from .models import (
     DraftCart,
     DraftItem,
     PlatformOutcome,
+    ShoppingContract,
     StreamEvent,
 )
 from .providers.base import GroceryProvider
@@ -64,6 +65,7 @@ async def run_comparison(
     force_estimated: bool = False,
     operation_id: str | None = None,
     draft_sink: dict[str, DraftCart] | None = None,
+    contract: ShoppingContract | None = None,
 ) -> ComparisonReport:
     """Build the same basket everywhere and rank the resulting real totals."""
     # 1. Search every platform concurrently.
@@ -154,6 +156,7 @@ async def run_comparison(
                 drafts[provider_id], summary, settings,
                 status="ok" if summary is not None else "failed",
                 error=error,
+                contract=contract,
             )
         )
     for provider_id, error in failures.items():
@@ -166,4 +169,4 @@ async def run_comparison(
         )
 
     _emit(on_event, "compare", "Ranking platforms…")
-    return rank(outcomes, settings)
+    return rank(outcomes, settings, contract)

@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 import re
 from difflib import SequenceMatcher
+from itertools import combinations
+from itertools import product as cartesian_product
 from typing import TypeAlias
 
 from pydantic import ValidationError
@@ -10,7 +12,13 @@ from pydantic import ValidationError
 from .config import Settings
 from .constraints import parse_measurement, requested_measurement, units_for_candidate
 from .llm import GroqModelClient, HFModelClient, ModelBackendError, NvidiaModelClient
-from .models import CrossPlatformMatch, MatchDecision, PlannedItem, Product
+from .models import (
+    PROVIDER_QUERY_BRANDS,
+    CrossPlatformMatch,
+    MatchDecision,
+    PlannedItem,
+    Product,
+)
 
 MATCHER_SYSTEM = """You rank real grocery product candidates for one planned grocery item.
 Return only a JSON object with product_id, units_to_add, and reason. Choose only an in-stock
@@ -72,6 +80,8 @@ MATCH_TOKEN_ALIASES: dict[str, str] = {
     "mill": "milk",
 }
 Supply: TypeAlias = dict[str, tuple[Product, int] | None]
+SupplyOption: TypeAlias = tuple[Product, int, int]
+SupplyOptions: TypeAlias = dict[str, list[SupplyOption]]
 REQUIRED_MODIFIER_GROUPS = {
     "boneless": {"boneless"},
     "brown": {"brown"},
@@ -231,6 +241,60 @@ def _quantity_fit(item: PlannedItem, product: Product, units: int) -> tuple[floa
 # relevance (36) and pack fit (16) so it decides ties rather than overriding a
 # genuinely better match.
 POSITION_WEIGHT = 10.0
+
+# Product feeds do not expose a structured brand field, so cross-platform
+# equivalence has to derive one from the catalogue title. Keep known multi-word
+# brands ahead of the conservative leading-title fallback below.
+CATALOG_BRAND_PHRASES = {
+    *KNOWN_BRAND_PHRASES,
+    *PROVIDER_QUERY_BRANDS,
+    "24 mantra",
+    "badshah",
+    "basic",
+    "catch",
+    "daily good",
+    "everest",
+    "india gate",
+    "organic tattva",
+    "pillsbury",
+    "rajdhani",
+    "samrat",
+    "supreme harvest",
+    "tata sampann",
+    "whole farm",
+}
+BRAND_SUFFIX_NOISE = {
+    "chakki",
+    "everyday",
+    "grocery",
+    "high",
+    "long",
+    "multigrain",
+    "multigrains",
+    "organic",
+    "premium",
+    "raw",
+    "regular",
+    "rozana",
+    "sharbati",
+    "shudh",
+    "super",
+    "unpolished",
+    "wheat",
+}
+IDENTITY_NOISE_TOKENS = {
+    "g",
+    "gm",
+    "kg",
+    "l",
+    "litre",
+    "liter",
+    "ml",
+    "packaging",
+    "pc",
+    "pcs",
+    "vary",
+}
 
 
 def _score_candidate(
@@ -481,8 +545,37 @@ def match_across_platforms(
     if not _delivers_one_amount(verified_picks, candidates_by_provider, settings):
         return _fallback_cross_match(item, candidates_by_provider, settings)
 
+    # Measurable baskets have a deterministic equivalence hierarchy. Use it as
+    # the source of truth even when a hosted matcher returned valid ids; valid
+    # ids and equal weights alone do not prove that the model preferred an
+    # available exact product or common brand before considering price.
+    deterministic = _fallback_cross_match(item, candidates_by_provider, settings)
+    if _has_cross_platform_measurement(deterministic.picks, candidates_by_provider):
+        return deterministic
+
     result.picks = verified_picks
     return result
+
+
+def _has_cross_platform_measurement(
+    picks: dict[str, MatchDecision],
+    candidates_by_provider: dict[str, list[Product]],
+) -> bool:
+    measurable = 0
+    for provider, decision in picks.items():
+        if decision.product_id is None:
+            continue
+        product = next(
+            (
+                candidate
+                for candidate in candidates_by_provider.get(provider, [])
+                if candidate.id == decision.product_id
+            ),
+            None,
+        )
+        if product is not None and parse_measurement(product.pack_size or product.name):
+            measurable += 1
+    return measurable >= 2
 
 
 def _delivers_one_amount(
@@ -534,6 +627,190 @@ def _request_relevance(item: PlannedItem, product: Product) -> float:
     return len(query_tokens & name_tokens) / max(1, len(query_tokens))
 
 
+def _product_identity(product: Product) -> tuple[str, ...]:
+    """A conservative, order-independent product/variant identity.
+
+    Retailers reorder title fragments and punctuation, so token order is not a
+    useful SKU signal. Variant words such as ``organic``, ``multigrain`` and
+    ``medium grain`` deliberately remain: dropping them would make materially
+    different products look identical.
+    """
+    return tuple(
+        sorted(token for token in _tokens(product.name) if token not in IDENTITY_NOISE_TOKENS)
+    )
+
+
+def _product_brand(item: PlannedItem, product: Product) -> str | None:
+    """Extract a comparable brand label from a catalogue title.
+
+    Prefer the explicit vocabulary. For an unknown brand, use only the leading
+    title fragment before the requested product words and trim common variant
+    descriptors. This avoids treating trailing marketing copy as a brand while
+    still supporting store labels such as ``Daily Good``.
+    """
+    explicit = [
+        brand
+        for brand in CATALOG_BRAND_PHRASES
+        if _contains_phrase(product.name, brand)
+    ]
+    if explicit:
+        return max(explicit, key=lambda brand: (len(_tokens(brand)), len(brand)))
+
+    title_tokens = TOKEN_RE.findall(product.name.casefold())
+    query_tokens = _tokens(item.search_term)
+    category_positions = [
+        index for index, token in enumerate(title_tokens) if token in query_tokens
+    ]
+    if not category_positions or category_positions[0] == 0:
+        return None
+    prefix = title_tokens[: category_positions[0]]
+    while prefix and prefix[-1] in BRAND_SUFFIX_NOISE:
+        prefix.pop()
+    if not prefix:
+        return None
+    # Long prefixes usually contain marketing or variant language. A maximum of
+    # three words covers common Indian grocery labels without inventing a brand
+    # from the whole product title.
+    return " ".join(prefix[:3])
+
+
+def _supply_options_within_band(
+    item: PlannedItem,
+    candidates: list[Product],
+    reference: tuple[float, str],
+    settings: Settings,
+) -> list[SupplyOption]:
+    """Every reasonable candidate that can deliver the reference amount."""
+    amount, dimension = reference
+    if amount <= 0:
+        return []
+    options: list[SupplyOption] = []
+    for position, candidate in enumerate(candidates):
+        if not candidate.in_stock or not match_is_reasonable(item, candidate)[0]:
+            continue
+        packed = parse_measurement(candidate.pack_size or candidate.name)
+        if not packed or packed[1] != dimension or packed[0] <= 0:
+            continue
+        units = max(1, round(amount / packed[0]))
+        ratio = (packed[0] * units) / amount
+        if settings.min_fill_ratio <= ratio <= settings.max_fill_ratio:
+            options.append((candidate, units, position))
+    return options
+
+
+def _best_option(item: PlannedItem, options: list[SupplyOption]) -> SupplyOption:
+    """Choose by relevance, then price, only inside an equivalence group."""
+    return max(
+        options,
+        key=lambda entry: (
+            _request_relevance(item, entry[0]),
+            -(entry[0].price * entry[1]),
+            -entry[2],
+        ),
+    )
+
+
+def _product_similarity(left: Product, right: Product) -> float:
+    """Title similarity that rewards the same variant despite feed wording."""
+    left_tokens = set(_product_identity(left))
+    right_tokens = set(_product_identity(right))
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / max(len(left_tokens), len(right_tokens))
+
+
+def _grouped_supply(
+    item: PlannedItem,
+    options_by_provider: SupplyOptions,
+    *,
+    group_key,
+) -> tuple[str, Supply] | None:
+    """Best group represented on every platform that can supply this amount."""
+    target_providers = {
+        provider for provider, options in options_by_provider.items() if options
+    }
+    if not target_providers:
+        return None
+
+    groups: dict[str, dict[str, list[SupplyOption]]] = {}
+    for provider, options in options_by_provider.items():
+        for option in options:
+            key = group_key(option[0])
+            if not key:
+                continue
+            groups.setdefault(str(key), {}).setdefault(provider, []).append(option)
+
+    best: tuple[tuple[float, float, float], str, Supply] | None = None
+    for label, provider_options in groups.items():
+        if set(provider_options) != target_providers:
+            continue
+        providers = [
+            provider for provider in options_by_provider if provider in target_providers
+        ]
+        combinations_for_group = cartesian_product(
+            *(provider_options[provider] for provider in providers)
+        )
+        chosen: tuple[tuple[float, float, float, int], tuple[SupplyOption, ...]] | None = None
+        for candidate_combination in combinations_for_group:
+            products = [entry[0] for entry in candidate_combination]
+            key = (
+                sum(
+                    _product_similarity(left, right)
+                    for left, right in combinations(products, 2)
+                ),
+                sum(_request_relevance(item, product) for product in products),
+                -sum(
+                    product.price * units
+                    for product, units, _ in candidate_combination
+                ),
+                -sum(position for _, _, position in candidate_combination),
+            )
+            if chosen is None or key > chosen[0]:
+                chosen = (key, candidate_combination)
+        if chosen is None:
+            continue
+        supply: Supply = {provider: None for provider in options_by_provider}
+        for provider, (product, units, _) in zip(providers, chosen[1]):
+            supply[provider] = (product, units)
+        key = chosen[0][:3]
+        if best is None or key > best[0]:
+            best = (key, label, supply)
+    return None if best is None else (best[1], best[2])
+
+
+def _select_supply_for_reference(
+    item: PlannedItem,
+    options_by_provider: SupplyOptions,
+) -> tuple[int, str | None, Supply]:
+    """Apply exact product → common brand → disclosed substitution."""
+    exact = _grouped_supply(
+        item,
+        options_by_provider,
+        group_key=lambda product: _product_identity(product),
+    )
+    if exact is not None:
+        label, supply = exact
+        return 2, label, supply
+
+    branded = _grouped_supply(
+        item,
+        options_by_provider,
+        group_key=lambda product: _product_brand(item, product),
+    )
+    if branded is not None:
+        brand, supply = branded
+        return 1, brand, supply
+
+    supply: Supply = {}
+    for provider, options in options_by_provider.items():
+        if not options:
+            supply[provider] = None
+            continue
+        product, units, _ = _best_option(item, options)
+        supply[provider] = (product, units)
+    return 0, None, supply
+
+
 def _stated_reference(item: PlannedItem) -> tuple[float, str] | None:
     """The amount the request actually asked for, or None if it never said.
 
@@ -553,28 +830,11 @@ def _supply_within_band(
     settings: Settings,
 ) -> tuple[Product, int] | None:
     """The best candidate delivering the reference amount, or None."""
-    amount, dimension = reference
-    if amount <= 0:
+    options = _supply_options_within_band(item, candidates, reference, settings)
+    if not options:
         return None
-    best: tuple[tuple[float, float, int], Product, int] | None = None
-    for position, candidate in enumerate(candidates):
-        if not candidate.in_stock or not match_is_reasonable(item, candidate)[0]:
-            continue
-        packed = parse_measurement(candidate.pack_size or candidate.name)
-        if not packed or packed[1] != dimension or packed[0] <= 0:
-            continue
-        units = max(1, round(amount / packed[0]))
-        ratio = (packed[0] * units) / amount
-        if ratio < settings.min_fill_ratio or ratio > settings.max_fill_ratio:
-            continue
-        key = (
-            _request_relevance(item, candidate),
-            -(candidate.price * units),
-            -position,
-        )
-        if best is None or key > best[0]:
-            best = (key, candidate, units)
-    return None if best is None else (best[1], best[2])
+    product, units, _ = _best_option(item, options)
+    return product, units
 
 
 def _comparable_references(
@@ -619,20 +879,38 @@ def _fallback_cross_match(
     stated = _stated_reference(item)
     references = [stated] if stated else _comparable_references(item, candidates_by_provider)
 
-    best: tuple[tuple[int, float, float], tuple[float, str], Supply] | None = None
+    best: tuple[
+        tuple[int, int, float, float],
+        tuple[float, str],
+        int,
+        str | None,
+        Supply,
+    ] | None = None
     for reference in references:
-        supplied: Supply = {
-            provider: _supply_within_band(item, candidates, reference, settings)
+        options_by_provider: SupplyOptions = {
+            provider: _supply_options_within_band(
+                item, candidates, reference, settings
+            )
             for provider, candidates in candidates_by_provider.items()
         }
+        equivalence_tier, equivalence_label, supplied = _select_supply_for_reference(
+            item, options_by_provider
+        )
         matched = [entry for entry in supplied.values() if entry is not None]
         key = (
             len(matched),
+            equivalence_tier,
             sum(_request_relevance(item, product) for product, _ in matched),
             -sum(product.price * units for product, units in matched),
         )
         if best is None or key > best[0]:
-            best = (key, reference, supplied)
+            best = (
+                key,
+                reference,
+                equivalence_tier,
+                equivalence_label,
+                supplied,
+            )
 
     # Nothing measurable to compare on — loose items, pieces, unparsed packs.
     # Independent matching is the honest answer rather than a forced refusal.
@@ -645,7 +923,7 @@ def _fallback_cross_match(
         )
         return CrossPlatformMatch(picks=independent, equivalence_note=note)
 
-    _, (amount, dimension), supply = best
+    _, (amount, dimension), equivalence_tier, equivalence_label, supply = best
     picks: dict[str, MatchDecision] = {}
     for provider, entry in supply.items():
         if entry is None:
@@ -659,17 +937,43 @@ def _fallback_cross_match(
             )
             continue
         product, units = entry
+        if equivalence_tier == 2:
+            selection_reason = "Same product/variant across platforms"
+        elif equivalence_tier == 1:
+            selection_reason = (
+                f"Same {str(equivalence_label).title()} brand across platforms"
+            )
+        else:
+            selection_reason = (
+                "No common brand was available across all platforms; "
+                "using the closest equivalent here"
+            )
         picks[provider] = MatchDecision(
             product_id=product.id,
             units_to_add=units,
             reason=(
-                f"Comparable supply: {units} × {product.pack_size or product.name} "
-                f"for ₹{product.price * units:g}."
+                f"{selection_reason}: {units} × "
+                f"{product.pack_size or product.name} for "
+                f"₹{product.price * units:g}."
             ),
         )
 
     missing = sorted(provider for provider, entry in supply.items() if entry is None)
-    note = f"Compared on {amount:g} {dimension}."
+    if equivalence_tier == 2:
+        note = (
+            f"Matched the same product/variant across platforms and compared "
+            f"{amount:g} {dimension}."
+        )
+    elif equivalence_tier == 1:
+        note = (
+            f"Matched the same {str(equivalence_label).title()} brand across "
+            f"platforms and compared {amount:g} {dimension}."
+        )
+    else:
+        note = (
+            "No common brand was available across all platforms; compared "
+            f"equivalent {amount:g} {dimension} products using different brands."
+        )
     if missing:
         note += f" No equivalent amount on {', '.join(missing)}."
     return CrossPlatformMatch(picks=picks, equivalence_note=note)

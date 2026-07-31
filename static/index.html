@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Photo Shopping</title>
     <meta name="description" content="Turn a grocery photo or typed request into a ranked instant-grocery cart." />
-    <link rel="stylesheet" href="/styles.css?v=guided-workflow-11" />
-    <script src="/app.js?v=guided-workflow-11" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=cartproof-2" />
+    <script src="/app.js?v=cartproof-2" defer></script>
   </head>
   <body>
     <header class="nav-slab">
@@ -169,12 +169,47 @@
         <div class="transcription-notice" id="transcription-notice" role="status"></div>
         <div class="transcription-items" id="transcription-items"></div>
         <div class="transcription-actions">
+          <button class="btn btn--soft" id="add-transcription-item" type="button">
+            Add a missing item
+          </button>
           <button class="btn btn--soft" id="cloud-retry" type="button" hidden>
             <span class="button-label">Retry uncertain lines with cloud vision</span>
             <span class="spinner" aria-hidden="true"></span>
           </button>
           <button class="btn btn--primary" id="continue-reviewed" type="button">
             <span class="button-label">Use this list</span>
+            <span class="spinner" aria-hidden="true"></span>
+          </button>
+        </div>
+      </section>
+
+      <section class="contract-shell" id="cartproof-contract" aria-labelledby="cartproof-contract-title" hidden>
+        <header class="contract-head">
+          <div>
+            <span class="comparison-kicker">CartProof contract</span>
+            <h2 id="cartproof-contract-title">Confirm what every cart must satisfy</h2>
+            <p>
+              Required rules can disqualify a cheaper cart. Preferred rules stay visible
+              as compromises. Flexible rules allow equivalent alternatives.
+            </p>
+          </div>
+          <div class="contract-legend" aria-label="Requirement levels">
+            <span><i class="proof-dot is-pass"></i> Required</span>
+            <span><i class="proof-dot is-warning"></i> Preferred</span>
+            <span><i class="proof-dot"></i> Flexible</span>
+          </div>
+        </header>
+        <div class="contract-items" id="cartproof-contract-items"></div>
+        <label class="contract-budget">
+          <span>Maximum final cart total <small>(optional)</small></span>
+          <input id="cartproof-cart-budget" type="number" min="1" step="1" inputmode="decimal" placeholder="No overall budget" />
+        </label>
+        <div class="contract-actions">
+          <p id="cartproof-contract-note" role="status">
+            The same confirmed contract will be checked against every selected app.
+          </p>
+          <button class="btn btn--primary" id="confirm-cartproof-contract" type="button">
+            <span class="button-label">Confirm contract and compare</span>
             <span class="spinner" aria-hidden="true"></span>
           </button>
         </div>
@@ -221,7 +256,7 @@
           <div class="comparison-winner" id="comparison-winner" aria-live="polite"></div>
         </header>
         <details class="comparison-reason-details" id="comparison-reason-details">
-          <summary>Why these totals differ</summary>
+          <summary>CartProof decision receipt</summary>
           <div class="comparison-reasons" id="comparison-reasons" role="status"></div>
         </details>
         <p class="comparison-edit-help" id="comparison-edit-help">

@@ -82,7 +82,7 @@ QUANTITY_PATTERN = (
     rf"|(?:{NUMBER_WORD_PATTERN})"
 )
 UNIT_PATTERN = (
-    r"kilograms?|kilos?|kg|grams?|g|gm|litres?|liters?|l|ltr|ml|"
+    r"kilograms?|kilos?|kg|grams?|g|gm|gar|litres?|liters?|l|ltr|ml|"
     r"pcs?|pieces?|count|dozens?|packets?|packs?|boxes?|cartons?|"
     r"loaves?|loaf|bottles?|tins?|cans?|किलोग्राम|किलो|ग्राम|"
     r"मिलीलीटर|मिलिलीटर|लीटर|लिटर|दर्जन|पैकेट|डिब्बे?"
@@ -120,6 +120,7 @@ IMPLICIT_SINGLE_RE = re.compile(
     r"^(?=(?:dozens?|packets?|packs?|bottles?|tins?)\b)", re.IGNORECASE
 )
 UNIT_ALIASES = {
+    "gar": "g",
     "gm": "g",
     "gram": "g",
     "grams": "g",
@@ -270,6 +271,25 @@ TERM_ALIASES = {
     "coorflahes": "cornflakes",
     "sandurich": "sandwich",
     "sandwrich": "sandwich",
+    # Frequent letter-shape mistakes on otherwise ordinary grocery words.
+    "ahite": "white",
+    "amuel": "Amul",
+    "anuel": "Amul",
+    "bamanas": "bananas",
+    "bronie": "brownie",
+    "bronsie": "brownie",
+    "bruna": "bhuna",
+    "chara": "chana",
+    "cao": "cow",
+    "gingen": "ginger",
+    "jagguy": "jaggery",
+    "mill": "milk",
+    "pasti": "toothpaste",
+    "spmiach": "spinach",
+    "strawboerries": "strawberries",
+    "tamarina": "tamarind",
+    "thumbs up": "Thums Up",
+    "yoguet": "yogurt",
 }
 
 
@@ -442,29 +462,33 @@ def _budget_amount(match: re.Match[str] | None) -> float | None:
 # against "pani", which would order water.
 RETAIL_TERMS = frozenset(
     {
-        "aam", "achar", "almonds", "atta", "ball", "basmati", "beans", "besan", "bhindi",
-        "bhuna",
+        "aam", "achar", "almonds", "atta", "ball", "banana", "bananas",
+        "barbecue", "basmati", "batter", "beans", "besan", "bhindi", "bhuna",
         "black", "blue", "bodywash", "bottle", "bottles", "bread", "breast",
-        "brown", "butter", "can", "cans", "carrot", "chai", "chana",
-        "cheese", "chicken", "chocolate", "cocoa", "coffee", "cone", "cornflakes",
-        "coke", "cream", "curd",
-        "dal", "eggs", "enamel", "flour", "fruit", "garam", "gel", "ghee", "gobi", "ice",
-        "icecream", "jaggery",
-        "juice", "kaju", "kitkat", "loaf",
-        "maggi", "maida", "mango", "masala", "methi", "milk", "mixed", "moong",
-        "murmura", "nail", "noodles", "oil", "onion", "oregano", "oreo", "paint",
-        "paneer", "pasta", "patti", "peanut", "pen", "pencil", "penne", "poha",
-        "pickle", "polish", "potato", "powder",
-        "puffcorn", "rajma", "rava", "rice", "roasted", "salt", "sandwich", "soap",
-        "shower", "soup", "sooji", "sugar", "suji", "tea", "tomato", "toor",
-        "toothpaste", "turmeric", "upma", "water", "yellow",
+        "brown", "brownie", "butter", "can", "cans", "carrot", "chai", "chana",
+        "cheese", "chicken", "choco", "chocolate", "cocoa", "coffee", "cold",
+        "cone", "cornflakes", "coke", "cow", "cream", "curd", "dal",
+        "dalcheeni", "dalchini", "detergent",
+        "diet", "dosa", "eggs", "elaichi", "enamel", "flour", "fruit", "garam",
+        "gel", "ghee", "ginger", "gobi", "hing", "ice", "icecream", "jaggery",
+        "juice", "kaju", "kitkat", "loaf", "maggi", "maida", "mango", "masala",
+        "mayonnaise", "methi", "milk", "mixed", "moong", "murmura", "nail",
+        "noodles", "oil", "onion", "oregano", "oreo", "pads", "paint", "paneer",
+        "pasta", "patti", "peanut", "pen", "pencil", "penne", "poha", "pickle",
+        "polish", "potato", "powder", "puffcorn", "rajma", "rava", "rice",
+        "roasted", "salt", "sandwich", "sauce", "shower", "soap", "soup", "soy",
+        "spinach", "strawberries", "strawberry", "sooji", "sugar", "suji",
+        "tamarind", "tandoori", "tea", "thumbs", "thums", "tomato", "toor",
+        "toothpaste", "turmeric", "up", "upma", "water", "white", "yellow",
+        "yogurt",
     }
 )
 KNOWN_BRANDS = frozenset(
     {
         "amul", "aashirvaad", "britannia", "cadbury", "colgate", "daawat", "fortune",
-        "havmor", "kelloggs", "knorr", "kurkure", "maggi", "mother dairy", "oreo",
-        "pintola", "real", "rin", "tata",
+        "havmor", "id", "kelloggs", "knorr", "kurkure", "lays", "maggi",
+        "manforce", "modern", "mother dairy", "nescafe", "nestle", "odomos",
+        "oreo", "pintola", "real", "rin", "tata", "tide", "veeba",
     }
 )
 MEASUREMENT_WORDS = frozenset(
@@ -492,7 +516,23 @@ KNOWN_TERMS = tuple(
 
 def _strip_list_marker(value: str) -> str:
     """Remove a list ordinal without eating the integer part of ``2.5 kg``."""
-    return re.sub(r"^\s*\d+[.)](?!\d)\s*", "", value).strip()
+    return re.sub(
+        r"^\s*\d+(?:[.)](?!\d)\s*|[-:]\s+)",
+        "",
+        value,
+    ).strip()
+
+
+def _is_safe_low_confidence_line(line: RecognizedLine) -> bool:
+    """Recover an exact, single grocery word without lowering the global cutoff."""
+    for candidate in [line.text, *line.alternatives]:
+        body = _strip_list_marker(candidate).strip(" .,:;•→-").casefold()
+        if not re.fullmatch(r"[a-z]+", body):
+            continue
+        resolved = TERM_ALIASES.get(body, body).casefold()
+        if resolved in RETAIL_TERMS:
+            return True
+    return False
 
 
 def _normalise_ocr_candidate(value: str) -> str:
@@ -633,8 +673,8 @@ HEADER_RE = re.compile(r"^(?:\w+\W+){0,2}lists?\W*$", re.IGNORECASE)
 # writing. None is ever a grocery item, and "Date" or "Page No." would otherwise
 # be searched for and matched against something.
 STATIONERY_RE = re.compile(
-    r"^(?:good\s*luck|page\s*n[o0]\.?|date|name|class|subject|roll\s*n[o0]\.?|"
-    r"sr\.?\s*n[o0]\.?|topic|day)\W*$",
+    r"^(?:(?:good\s*luck|page\s*n[o0]\.?|date|name|class|subject|"
+    r"roll\s*n[o0]\.?|sr\.?\s*n[o0]\.?|topic|day)\W*)+$",
     re.IGNORECASE,
 )
 PROTECTED_AND_PHRASES = (
@@ -660,6 +700,7 @@ PARENTHETICAL_RE = re.compile(r"\(([^)]*)\)")
 QUANTITY_ONLY_RE = re.compile(
     rf"^(?:{QUANTITY_PATTERN})\s*(?:{UNIT_PATTERN})$", re.IGNORECASE
 )
+BARE_COUNT_NOTE_RE = re.compile(rf"^(?:{QUANTITY_PATTERN})$", re.IGNORECASE)
 # "(Amul - 500ml)" is a brand and a size together: the size belongs on the line,
 # the brand in the context.
 MEASUREMENT_IN_NOTE_RE = re.compile(
@@ -833,6 +874,8 @@ def _split_parenthetical(value: str) -> tuple[str, str]:
         amount = IMPLICIT_SINGLE_RE.sub("1 ", note)
         if QUANTITY_ONLY_RE.match(amount):
             return f" {amount} "
+        if BARE_COUNT_NOTE_RE.match(amount):
+            return f" {amount} count "
         measurement = MEASUREMENT_IN_NOTE_RE.search(note)
         if measurement:
             rest = (note[: measurement.start()] + note[measurement.end() :]).strip(" -–—,;")
@@ -1067,7 +1110,12 @@ def plan_locally(
     photo_lines = _repair_arrow_bullets(photo_lines)
     photo_lines = _repair_bare_list_ordinals(photo_lines)
     photo_lines = _repair_adjacent_row_spills(photo_lines)
-    readable = [line for line in photo_lines if line.confidence >= MIN_LINE_CONFIDENCE]
+    readable = [
+        line
+        for line in photo_lines
+        if line.confidence >= MIN_LINE_CONFIDENCE
+        or _is_safe_low_confidence_line(line)
+    ]
     skipped = len(photo_lines) - len(readable)
     photo_text = "\n".join(line.text for line in readable)
     combined = "\n".join(part for part in (text.strip(), photo_text) if part)
@@ -1164,7 +1212,8 @@ def plan_locally(
     if skipped:
         note += (
             f" {skipped} line{'s' if skipped != 1 else ''} could not be read clearly "
-            "and were left out; add them by hand if the list looks short."
+            f"and {'were' if skipped != 1 else 'was'} left out; use "
+            "“Add a missing item” if the list looks short."
         )
     return CartPlan(
         items=items,

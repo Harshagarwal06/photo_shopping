@@ -16,3 +16,6 @@ ranking_picks.json
 .photo_shopping_state.sqlite3
 .photo_shopping_state.sqlite3-shm
 .photo_shopping_state.sqlite3-wal
+
+# Personal handwriting test photos, not project fixtures
+handwritten_list/

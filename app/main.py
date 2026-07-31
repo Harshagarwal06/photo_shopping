@@ -29,12 +29,15 @@ from .models import (
     ComparisonProposal,
     ConfirmRequest,
     ConfirmResponse,
+    ContractConfirmRequest,
+    DecisionReceipt,
     DraftCart,
     DraftItem,
     ImageQualityReport,
     ProposalOverrideRequest,
     ProviderSelectionRequest,
     SearchRequest,
+    ShoppingContract,
     StreamEvent,
     VerifiedComparisonRequest,
 )
@@ -445,6 +448,33 @@ async def preview_plan(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+@app.post("/api/contracts/preview", response_model=ShoppingContract)
+async def preview_contract(plan: CartPlan) -> ShoppingContract:
+    return comparison_service.create_contract(plan)
+
+
+@app.get("/api/contracts/{contract_id}", response_model=ShoppingContract)
+async def get_contract(contract_id: str) -> ShoppingContract:
+    contract = comparison_service.get_contract(contract_id)
+    if contract is None:
+        raise HTTPException(status_code=404, detail="Shopping contract not found.")
+    return contract
+
+
+@app.post(
+    "/api/contracts/{contract_id}/confirm",
+    response_model=ShoppingContract,
+)
+async def confirm_contract(
+    contract_id: str,
+    request: ContractConfirmRequest,
+) -> ShoppingContract:
+    try:
+        return comparison_service.confirm_contract(contract_id, request)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @app.post("/api/drafts/stream")
 async def create_draft_stream(
     text: str = Form(default=""),
@@ -762,6 +792,7 @@ async def estimate_comparison(
     image: UploadFile | None = File(default=None),
     provider_ids: str = Form(default="blinkit,instamart,zepto"),
     plan_json: str = Form(default=""),
+    contract_id: str = Form(default=""),
 ) -> ComparisonProposal:
     image_bytes, image_type = await read_uploaded_image(image)
     reviewed_plan: CartPlan | None = None
@@ -789,7 +820,12 @@ async def estimate_comparison(
                 image_type=image_type,
                 provider_ids=selected,
             )
-        return await comparison_service.estimate(plan, selected)
+        contract = None
+        if contract_id.strip():
+            contract = comparison_service.get_contract(contract_id.strip())
+            if contract is None:
+                raise ValueError("Shopping contract not found or expired.")
+        return await comparison_service.estimate(plan, selected, contract)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ProviderError as exc:
@@ -853,6 +889,28 @@ async def get_comparison(operation_id: str) -> ComparisonOperation:
     if operation is None:
         raise HTTPException(status_code=404, detail="Comparison operation not found.")
     return operation
+
+
+@app.get(
+    "/api/comparisons/proposals/{proposal_id}/receipt",
+    response_model=DecisionReceipt,
+)
+async def get_proposal_receipt(proposal_id: str) -> DecisionReceipt:
+    receipt = comparison_service.proposal_receipt(proposal_id)
+    if receipt is None:
+        raise HTTPException(status_code=404, detail="Comparison proposal not found.")
+    return receipt
+
+
+@app.get(
+    "/api/comparisons/{operation_id}/receipt",
+    response_model=DecisionReceipt,
+)
+async def get_operation_receipt(operation_id: str) -> DecisionReceipt:
+    receipt = comparison_service.operation_receipt(operation_id)
+    if receipt is None:
+        raise HTTPException(status_code=404, detail="Comparison operation not found.")
+    return receipt
 
 
 @app.post(

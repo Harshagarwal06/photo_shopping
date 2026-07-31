@@ -38,6 +38,10 @@ def live_demo(tmp_path_factory):
         **os.environ,
         "DEMO_MODE": "true",
         "MODEL_BACKEND": "local",
+        "RECOGNITION_POLICY": "review",
+        "GROQ_API_KEY": "",
+        "HF_TOKEN": "",
+        "NVIDIA_API_KEY": "",
         "STATE_DB_PATH": str(state_dir / "state.sqlite3"),
         "SWIGGY_REDIRECT_URI": (
             f"http://localhost:{port}/api/providers/instamart/callback"
@@ -101,6 +105,10 @@ def test_demo_uses_the_submitted_list_and_stays_responsive(live_demo):
         page.get_by_role("button", name="Preview product matches").click()
 
         expect(
+            page.get_by_role("heading", name="Check what the photo says")
+        ).to_be_visible()
+        page.get_by_role("button", name="Search Blinkit for these items").click()
+        expect(
             page.get_by_role("heading", name="Preview the Blinkit matches")
         ).to_be_visible()
         review = page.locator("#review")
@@ -143,4 +151,84 @@ def test_photo_picker_surfaces_retake_guidance_before_submission(live_demo):
         quality = page.locator("#photo-quality")
         expect(quality).to_have_attribute("data-status", "retake")
         expect(quality).to_contain_text("Retake recommended")
+        browser.close()
+
+
+def test_demo_compares_all_three_apps_without_live_connections(live_demo):
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.goto(live_demo)
+        page.get_by_label("Type your list (optional)").fill(
+            "2 L Amul milk\n12 eggs\n500 g basmati rice"
+        )
+        page.get_by_role("button", name="Compare prices").click()
+
+        expect(
+            page.get_by_role("heading", name="Check what the photo says")
+        ).to_be_visible()
+        page.get_by_role("button", name="Compare these items").click()
+        expect(
+            page.get_by_role(
+                "heading", name="Confirm what every cart must satisfy"
+            )
+        ).to_be_visible()
+        page.get_by_role("button", name="Confirm contract and compare").click()
+
+        comparison = page.locator("#comparison")
+        expect(comparison).to_be_visible(timeout=15_000)
+        expect(comparison).to_contain_text("Blinkit")
+        expect(comparison).to_contain_text("Swiggy Instamart")
+        expect(comparison).to_contain_text("Zepto")
+        expect(comparison).to_contain_text("No cart was changed")
+        for width in (320, 375, 768, 1280):
+            page.set_viewport_size({"width": width, "height": 900})
+            assert page.evaluate(
+                "() => document.documentElement.scrollWidth "
+                "<= document.documentElement.clientWidth"
+            )
+        page.get_by_role(
+            "button", name="Check exact-total requirements"
+        ).click()
+        expect(page.locator("#toast-stack")).to_contain_text(
+            "cart reading is not ready"
+        )
+        browser.close()
+
+
+def test_photo_review_can_add_an_ocr_line_that_was_missed(live_demo):
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.goto(live_demo)
+        page.locator("#request-image").set_input_files(
+            str(ROOT / "tests" / "fixtures" / "handwritten_list.jpeg")
+        )
+        expect(page.locator("#photo-quality")).to_have_attribute(
+            "data-status", "good"
+        )
+        page.get_by_role("button", name="Preview product matches").click()
+
+        expect(
+            page.get_by_role("heading", name="Check what the photo says")
+        ).to_be_visible()
+        rows = page.locator("[data-plan-item]")
+        before = rows.count()
+        existing_product = rows.first.get_by_label("Product")
+        existing_product.fill("edited paneer")
+        existing_include = rows.nth(1).get_by_label("Include")
+        existing_include.uncheck()
+        page.get_by_role("button", name="Add a missing item").click()
+        expect(rows).to_have_count(before + 1)
+        expect(rows.first.get_by_label("Product")).to_have_value("edited paneer")
+        expect(rows.nth(1).get_by_label("Include")).not_to_be_checked()
+        manual_row = page.locator("[data-plan-item]").last
+        manual_row.get_by_label("Product").fill("onions")
+        expect(manual_row).to_contain_text("Added manually")
+        for width in (320, 375, 768, 1280):
+            page.set_viewport_size({"width": width, "height": 900})
+            assert page.evaluate(
+                "() => document.documentElement.scrollWidth "
+                "<= document.documentElement.clientWidth"
+            )
         browser.close()

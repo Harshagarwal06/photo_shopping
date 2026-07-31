@@ -94,3 +94,16 @@ def test_comparison_proposals_and_operations_recover_after_restart(tmp_path):
 
     assert restarted.get_proposal(proposal.id) == proposal
     assert restarted.get_operation(operation.id) == operation
+
+
+def test_shopping_contract_recovers_with_its_bound_plan(tmp_path):
+    store = build_store(tmp_path / "state.sqlite3")
+    settings = Settings(_env_file=None)
+    first = ComparisonService({}, settings, store)
+    plan = CartPlan(items=[PlannedItem(search_term="milk")])
+    contract = first.create_contract(plan)
+
+    restarted = ComparisonService({}, settings, build_store(store.path))
+
+    assert restarted.get_contract(contract.id) == contract
+    assert restarted.contract_plans[contract.id] == plan

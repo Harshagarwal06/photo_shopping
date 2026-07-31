@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Literal
 
+from .cartproof import prove_platform
 from .config import Settings
 from .models import (
     CartLine,
@@ -16,6 +17,7 @@ from .models import (
     DraftCart,
     FeeLine,
     PlatformOutcome,
+    ShoppingContract,
     Substitution,
 )
 from .units import fill_ratio, per_unit_price
@@ -66,6 +68,7 @@ def build_outcome(
     *,
     status: Literal["ok", "not_connected", "unavailable", "failed"] = "ok",
     error: str = "",
+    contract: ShoppingContract | None = None,
 ) -> PlatformOutcome:
     """Fold a platform's draft and cart summary into a comparable outcome."""
     if status != "ok":
@@ -116,6 +119,11 @@ def build_outcome(
         else:
             matched += 1
 
+    proof = (
+        prove_platform(contract, draft, summary, settings)
+        if contract is not None
+        else None
+    )
     return PlatformOutcome(
         provider=provider_id,
         display_name=display_name,
@@ -126,6 +134,7 @@ def build_outcome(
         missing_items=missing,
         unverified_items=unverified,
         substitutions=substitutions,
+        proof=proof,
     )
 
 
@@ -135,6 +144,7 @@ def _rankable(outcome: PlatformOutcome) -> bool:
         outcome.status == "ok"
         and outcome.summary is not None
         and outcome.summary.reconciles
+        and (outcome.proof is None or outcome.proof.eligible)
     )
 
 
@@ -148,7 +158,11 @@ def _eta(outcome: PlatformOutcome) -> int:
     return eta if eta is not None else 10**6
 
 
-def rank(outcomes: list[PlatformOutcome], settings: Settings) -> ComparisonReport:
+def rank(
+    outcomes: list[PlatformOutcome],
+    settings: Settings,
+    contract: ShoppingContract | None = None,
+) -> ComparisonReport:
     """Rank platforms lexicographically: coverage tier, then real total, then ETA."""
     reasons: list[str] = []
 
@@ -160,6 +174,12 @@ def rank(outcomes: list[PlatformOutcome], settings: Settings) -> ComparisonRepor
                 f"{outcome.display_name} was excluded — "
                 f"{outcome.summary.reconciliation_error}"
             )
+        elif outcome.proof is not None and not outcome.proof.eligible:
+            reasons.append(
+                f"{outcome.display_name} was not ranked because CartProof found "
+                f"{outcome.proof.required_failures} required requirement"
+                f"{'' if outcome.proof.required_failures == 1 else 's'} that did not pass."
+            )
 
     is_estimated = any(
         outcome.summary.estimated for outcome in outcomes if outcome.summary
@@ -169,12 +189,24 @@ def rank(outcomes: list[PlatformOutcome], settings: Settings) -> ComparisonRepor
     if not rankable:
         if not reasons:
             reasons.append("No platform produced a comparable cart.")
-        return ComparisonReport(platforms=outcomes, winner=None, ranking=[],
-                                reasons=reasons, estimated=is_estimated)
+        return ComparisonReport(
+            platforms=outcomes,
+            winner=None,
+            ranking=[],
+            reasons=reasons,
+            estimated=is_estimated,
+            contract_id=contract.id if contract else None,
+            contract_version=contract.version if contract else None,
+            contract_fingerprint=contract.fingerprint if contract else "",
+        )
 
     ordered = sorted(
         rankable,
-        key=lambda outcome: (outcome.coverage_tier, round(_summary(outcome).total, 2)),
+        key=lambda outcome: (
+            outcome.coverage_tier,
+            outcome.proof.preference_misses if outcome.proof else 0,
+            round(_summary(outcome).total, 2),
+        ),
     )
 
     # ETA tiebreak: within the price band, prefer the faster platform.
@@ -183,6 +215,11 @@ def rank(outcomes: list[PlatformOutcome], settings: Settings) -> ComparisonRepor
         outcome
         for outcome in ordered
         if outcome.coverage_tier == best.coverage_tier
+        and (
+            outcome.proof.preference_misses if outcome.proof else 0
+        ) == (
+            best.proof.preference_misses if best.proof else 0
+        )
         and round(_summary(outcome).total, 2) - round(_summary(best).total, 2)
         <= settings.eta_tiebreak_rupees
     ]
@@ -230,4 +267,7 @@ def rank(outcomes: list[PlatformOutcome], settings: Settings) -> ComparisonRepor
         ranking=[outcome.provider for outcome in ordered],
         reasons=reasons,
         estimated=is_estimated,
+        contract_id=contract.id if contract else None,
+        contract_version=contract.version if contract else None,
+        contract_fingerprint=contract.fingerprint if contract else "",
     )

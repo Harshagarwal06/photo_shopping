@@ -32,6 +32,8 @@ from app.local_vision import (
         # A decimal is not a numbered-list marker: "2." must not be stripped.
         ("2.5 kg rice", "rice", 2.5, "kg"),
         ("1. milk 2 l", "milk", 2, "l"),
+        ("8- blue lays", "blue lays", 1, "item"),
+        ("5: masala chai", "masala chai", 1, "item"),
     ],
 )
 def test_parses_dozens_packets_and_fractions(line, term, quantity, unit):
@@ -152,6 +154,56 @@ def test_misread_terms_resolve(line, term):
 
 
 @pytest.mark.parametrize(
+    ("line", "term"),
+    [
+        ("Bamanas", "bananas"),
+        ("Spmiach", "spinach"),
+        ("Strawboerries", "strawberries"),
+        ("Yoguet", "yogurt"),
+        ("Tamarina", "tamarind"),
+        ("Jagguy", "jaggery"),
+        ("choco bronsie ice cream", "choco brownie ice cream"),
+    ],
+)
+def test_common_handwriting_misreads_resolve_to_grocery_terms(line, term):
+    assert _parse_item(line, "photo").search_term == term
+
+
+def test_bare_parenthetical_count_and_common_unit_misread_are_preserved():
+    bananas = _parse_item("Bamanas (6)", "photo")
+    toothpaste = _parse_item("Colgate Pasti 200 gar", "photo")
+
+    assert (bananas.search_term, bananas.quantity, bananas.unit) == (
+        "bananas",
+        6,
+        "count",
+    )
+    assert (
+        toothpaste.search_term,
+        toothpaste.context,
+        toothpaste.quantity,
+        toothpaste.unit,
+    ) == ("toothpaste", "Colgate", 200, "g")
+
+
+@pytest.mark.parametrize(
+    ("line", "term", "context"),
+    [
+        ("ID Dosa batter", "Dosa batter", "Id"),
+        ("Modern ahite bread", "white bread", "Modern"),
+        ("Tide detergent", "detergent", "Tide"),
+        ("Veeba Tandoori mayonnaise", "Tandoori mayonnaise", "Veeba"),
+    ],
+)
+def test_common_quick_commerce_brands_are_kept_as_matching_context(
+    line, term, context
+):
+    item = _parse_item(line, "photo")
+
+    assert (item.search_term, item.context) == (term, context)
+
+
+@pytest.mark.parametrize(
     "line",
     [
         # "paneer" scores 0.8 against "pani" (water) and "pen" is close to several
@@ -217,7 +269,7 @@ def test_letter_shape_confusions_resolve(line, term):
 
 @pytest.mark.parametrize(
     "line",
-    ["Dalcheeni", "Pads", "Tide detergent", "Barbecue sauce", "ID Dosa batter", "maggi"],
+    ["Dalcheeni", "Pads", "Barbecue sauce", "maggi"],
 )
 def test_single_letter_swaps_do_not_capture_ordinary_products(line):
     """Dalcheeni is cinnamon; one letter from "cheeni" it would become sugar."""
@@ -248,6 +300,7 @@ def test_a_bracketed_brand_becomes_context_not_part_of_the_query(line, term, con
         ("rice (1/2 kg)", 0.5, "kg"),
         ("eggs (dozen)", 12, "count"),
         ("maggi (packet)", 1, "pack"),
+        ("bananas (6)", 6, "count"),
     ],
 )
 def test_a_bracketed_amount_is_read_as_the_quantity(line, quantity, unit):
@@ -264,7 +317,16 @@ def test_a_line_that_is_only_a_bracketed_word_keeps_that_word():
 
 @pytest.mark.parametrize(
     "line",
-    ["GoodLuck", "Page No.", "Date", "Name", "Roll No.", "• Grocery ust", "• Crocery list."],
+    [
+        "GoodLuck",
+        "Page No.",
+        "GoodLuck Page No.",
+        "Date",
+        "Name",
+        "Roll No.",
+        "• Grocery ust",
+        "• Crocery list.",
+    ],
 )
 def test_notebook_furniture_and_misread_headings_are_dropped(line):
     """A ruled notebook prints its own words, and OCR reads them as list items.
@@ -290,7 +352,7 @@ def test_furniture_filter_leaves_products_alone(line):
         ("curd (Nestle - 400 gm)", "curd", "Nestle", 400, "g"),
         ("atta (Aashirvaad 5 kg)", "atta", "Aashirvaad", 5, "kg"),
         # An opening bracket read as "C", as photographed.
-        ("Cao mill CAmul - 500ml)", "Cao mill", "Amul", 500, "ml"),
+        ("Cao mill CAmul - 500ml)", "cow milk", "Amul", 500, "ml"),
     ],
 )
 def test_a_bracket_holding_brand_and_size_yields_both(line, term, context, quantity, unit):
@@ -305,7 +367,7 @@ def test_a_bracket_holding_brand_and_size_yields_both(line, term, context, quant
 
 
 @pytest.mark.parametrize(
-    "line", ["Coke Can", "Cold coffee", "Coffee", "Curd", "Crocin tablets", "Cao mill"]
+    "line", ["Coke Can", "Cold coffee", "Coffee", "Curd", "Crocin tablets"]
 )
 def test_the_bracket_repair_needs_an_unclosed_bracket(line):
     """Only a line that closes a bracket it never opened is repaired, so an
@@ -498,6 +560,11 @@ def test_unreadable_lines_are_skipped_and_disclosed(monkeypatch):
         "app.local_vision.recognize_details",
         lambda _bytes, _media_type: [
             RecognizedLine(confidence=1.0, text="milk 2 l"),
+            RecognizedLine(
+                confidence=0.3,
+                text="Onion",
+                alternatives=["Onions", "nions"],
+            ),
             RecognizedLine(confidence=0.3, text="Leach ba to gara"),
             RecognizedLine(confidence=0.3, text="aditate:"),
         ],
@@ -505,5 +572,5 @@ def test_unreadable_lines_are_skipped_and_disclosed(monkeypatch):
 
     plan = plan_locally(text="", image_bytes=b"image", image_media_type="image/jpeg")
 
-    assert [item.search_term for item in plan.items] == ["milk"]
+    assert [item.search_term for item in plan.items] == ["milk", "Onion"]
     assert "2 lines could not be read clearly" in plan.processing_note

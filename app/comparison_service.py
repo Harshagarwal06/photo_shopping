@@ -13,6 +13,15 @@ from uuid import uuid4
 from .compare import build_outcome, estimated_summary, rank
 from .config import Settings
 from .constraints import enforce_constraints
+from .contracts import (
+    auto_confirm_contract,
+    build_contract,
+    plan_for_contract,
+    validate_contract_plan,
+)
+from .contracts import (
+    confirm_contract as confirm_contract_payload,
+)
 from .models import (
     CartPlan,
     CleanupOutcome,
@@ -20,9 +29,12 @@ from .models import (
     ComparisonOperation,
     ComparisonPreflight,
     ComparisonProposal,
+    ContractConfirmRequest,
+    DecisionReceipt,
     PlatformOutcome,
     PlatformPreflight,
     ProposalOverrideRequest,
+    ShoppingContract,
 )
 from .orchestrator import run_comparison
 from .providers.base import GroceryProvider
@@ -35,6 +47,7 @@ class _Confirmation:
     proposal_id: str
     provider_ids: tuple[str, ...]
     expires_at: float
+    contract_fingerprint: str = ""
 
 
 class ComparisonService:
@@ -49,6 +62,8 @@ class ComparisonService:
         self.state_store = state_store
         self.proposals: OrderedDict[str, ComparisonProposal] = OrderedDict()
         self.operations: OrderedDict[str, ComparisonOperation] = OrderedDict()
+        self.contracts: OrderedDict[str, ShoppingContract] = OrderedDict()
+        self.contract_plans: OrderedDict[str, CartPlan] = OrderedDict()
         self._confirmations: OrderedDict[str, _Confirmation] = OrderedDict()
         self._lock = asyncio.Lock()
 
@@ -86,6 +101,60 @@ class ComparisonService:
         self._remember(self.proposals, proposal_id, proposal)
         return proposal
 
+    def _remember_contract(
+        self,
+        contract: ShoppingContract,
+        plan: CartPlan,
+    ) -> ShoppingContract:
+        self.contracts[contract.id] = contract
+        self.contracts.move_to_end(contract.id)
+        self.contract_plans[contract.id] = plan
+        self.contract_plans.move_to_end(contract.id)
+        while len(self.contracts) > self.settings.max_state_records:
+            expired_id, _ = self.contracts.popitem(last=False)
+            self.contract_plans.pop(expired_id, None)
+        if self.state_store is not None:
+            self.state_store.save(
+                "shopping_contract",
+                contract.id,
+                {
+                    "contract": contract.model_dump(mode="json"),
+                    "plan": plan.model_dump(mode="json"),
+                },
+            )
+        return contract
+
+    def get_contract(self, contract_id: str) -> ShoppingContract | None:
+        contract = self.contracts.get(contract_id)
+        if contract is not None or self.state_store is None:
+            return contract
+        payload = self.state_store.load("shopping_contract", contract_id)
+        if payload is None:
+            return None
+        try:
+            contract = ShoppingContract.model_validate(payload["contract"])
+            plan = CartPlan.model_validate(payload["plan"])
+        except (KeyError, TypeError, ValueError):
+            self.state_store.delete("shopping_contract", contract_id)
+            return None
+        return self._remember_contract(contract, plan)
+
+    def create_contract(self, plan: CartPlan) -> ShoppingContract:
+        contract = build_contract(plan)
+        return self._remember_contract(contract, plan)
+
+    def confirm_contract(
+        self,
+        contract_id: str,
+        request: ContractConfirmRequest,
+    ) -> ShoppingContract:
+        current = self.get_contract(contract_id)
+        plan = self.contract_plans.get(contract_id)
+        if current is None or plan is None:
+            raise ValueError("Shopping contract not found.")
+        confirmed = confirm_contract_payload(current, request, plan)
+        return self._remember_contract(confirmed, plan)
+
     def get_operation(self, operation_id: str) -> ComparisonOperation | None:
         operation = self.operations.get(operation_id)
         if operation is not None or self.state_store is None:
@@ -100,6 +169,38 @@ class ComparisonService:
             return None
         self._remember(self.operations, operation_id, operation)
         return operation
+
+    @staticmethod
+    def _receipt(
+        comparison_id: str,
+        comparison_kind: Literal["proposal", "operation"],
+        report,
+    ) -> DecisionReceipt:
+        if not report.contract_id or report.contract_version is None:
+            raise ValueError("This comparison does not contain a CartProof contract.")
+        return DecisionReceipt(
+            comparison_id=comparison_id,
+            comparison_kind=comparison_kind,
+            contract_id=report.contract_id,
+            contract_version=report.contract_version,
+            contract_fingerprint=report.contract_fingerprint,
+            winner=report.winner,
+            estimated=report.estimated,
+            platforms=report.platforms,
+            reasons=report.reasons,
+        )
+
+    def proposal_receipt(self, proposal_id: str) -> DecisionReceipt | None:
+        proposal = self.get_proposal(proposal_id)
+        if proposal is None:
+            return None
+        return self._receipt(proposal.id, "proposal", proposal.report)
+
+    def operation_receipt(self, operation_id: str) -> DecisionReceipt | None:
+        operation = self.get_operation(operation_id)
+        if operation is None:
+            return None
+        return self._receipt(operation.id, "operation", operation.report)
 
     def _purge_expired_confirmations(self) -> None:
         now = time.monotonic()
@@ -230,6 +331,11 @@ class ComparisonService:
                             time.monotonic()
                             + self.settings.comparison_confirmation_ttl_seconds
                         ),
+                        contract_fingerprint=(
+                            proposal.contract.fingerprint
+                            if proposal.contract is not None
+                            else ""
+                        ),
                     ),
                 )
                 proposal.frozen = True
@@ -254,8 +360,16 @@ class ComparisonService:
         self,
         plan: CartPlan,
         provider_ids: list[str],
+        contract: ShoppingContract | None = None,
     ) -> ComparisonProposal:
         started = time.perf_counter()
+        if contract is None:
+            contract = auto_confirm_contract(plan)
+            self._remember_contract(contract, plan)
+        if contract.status != "confirmed" or not contract.fingerprint:
+            raise ValueError("Confirm the CartProof shopping contract before comparison.")
+        validate_contract_plan(contract, plan)
+        plan = plan_for_contract(plan, contract)
         selected = self._selected(provider_ids)
         preflight = await self.preflight(provider_ids, mode="estimated")
         eligible_ids = [
@@ -275,9 +389,10 @@ class ComparisonService:
                 self.settings,
                 force_estimated=True,
                 draft_sink=drafts,
+                contract=contract,
             )
         else:
-            report = rank([], self.settings)
+            report = rank([], self.settings, contract)
 
         present = {outcome.provider for outcome in report.platforms}
         for platform in preflight.platforms:
@@ -296,7 +411,7 @@ class ComparisonService:
                 )
             )
 
-        report = rank(report.platforms, self.settings)
+        report = rank(report.platforms, self.settings, contract)
         report.estimated = True
         proposal = ComparisonProposal(
             mode="estimated",
@@ -304,6 +419,7 @@ class ComparisonService:
             report=report,
             provider_ids=eligible_ids,
             drafts=drafts,
+            contract=contract.model_copy(deep=True),
         )
         self._remember(
             self.proposals,
@@ -375,6 +491,7 @@ class ComparisonService:
                     provider_draft,
                     summary,
                     self.settings,
+                    contract=proposal.contract,
                 )
             )
         outcomes.extend(
@@ -382,7 +499,7 @@ class ComparisonService:
             for outcome in proposal.report.platforms
             if outcome.provider not in proposal.drafts
         )
-        proposal.report = rank(outcomes, self.settings)
+        proposal.report = rank(outcomes, self.settings, proposal.contract)
         proposal.report.estimated = True
         proposal.frozen = False
         self._confirmations = OrderedDict(
@@ -420,6 +537,18 @@ class ComparisonService:
                 raise ValueError("Comparison proposal not found.")
             if not proposal.frozen:
                 raise ValueError("Review and preflight the proposal again before verification.")
+            if proposal.contract is not None:
+                current_contract = self.get_contract(proposal.contract.id)
+                if (
+                    current_contract is None
+                    or current_contract.status != "confirmed"
+                    or current_contract.fingerprint != proposal.contract.fingerprint
+                    or confirmation.contract_fingerprint
+                    != proposal.contract.fingerprint
+                ):
+                    raise ValueError(
+                        "The CartProof contract changed. Compare and confirm it again."
+                    )
 
             final_preflight = await self.preflight(
                 list(confirmation.provider_ids),
@@ -458,6 +587,7 @@ class ComparisonService:
                         draft,
                         summary,
                         self.settings,
+                        contract=proposal.contract,
                     )
                 except Exception as exc:
                     return PlatformOutcome(
@@ -470,7 +600,7 @@ class ComparisonService:
             outcomes = await asyncio.gather(
                 *(settle(provider_id) for provider_id in confirmation.provider_ids)
             )
-            report = rank(list(outcomes), self.settings)
+            report = rank(list(outcomes), self.settings, proposal.contract)
             operation = ComparisonOperation(
                 id=operation_id,
                 proposal_id=proposal.id,

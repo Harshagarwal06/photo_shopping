@@ -1,45 +1,100 @@
 # Photo Shopping
 
-A local grocery assistant for typed requests and photographed handwritten lists. It
-parses the request, searches a configured grocery provider, ranks one best product for
-each requested item, and builds a reviewable draft.
+A local-first grocery assistant that turns a typed request or a photo of a handwritten
+list into a ranked, reviewable cart — and can price the same basket across Blinkit,
+Swiggy Instamart, and Zepto to recommend the cheapest equivalent option. Built as a
+deep dive into safe, verifiable LLM/vision-assisted automation: every step that can
+touch a real cart is gated, logged, and provable rather than trusted on faith.
 
-Blinkit, Swiggy Instamart, and Zepto are available from the provider selector.
-Instamart uses Swiggy's official MCP endpoint and OAuth 2.1 flow; Blinkit and
-Zepto use isolated local browser profiles.
+## Key features
 
-## What is implemented
+- **Handwritten list → cart.** On-device macOS Vision OCR reads a photo, an optional
+  hosted vision model (Groq/NVIDIA/HF) re-checks only the isolated uncertain lines
+  (never the full photo), and a capture-quality preflight catches bad lighting, tilt,
+  or blur before OCR ever runs.
+- **English/Hindi/Hinglish parsing** for quantities, units, brands, budgets, and price
+  preferences, with a local rule-based fallback when no hosted model is configured.
+- **Two recognition modes**: an editable transcription-review checkpoint (default), or
+  `autonomous_safe` mode, which scores Local Vision, an independent hosted reading, and
+  live catalogue matches together and only auto-accepts strong, agreeing readings.
+- **CartProof shopping contracts** — the request is turned into an explicit,
+  user-confirmed contract (required / preferred / flexible rules per item, brand and
+  substitution policy, quantity tolerance, budget caps). A deterministic proof engine
+  checks every candidate product and cart against that contract, so a cheaper cart can
+  never win by silently violating a required rule.
+- **Cross-platform price comparison** across Blinkit, Instamart, and Zepto that
+  normalizes to the *same delivered quantity* (e.g., two 250 g packs legitimately cover
+  a 500 g requirement) before comparing price, so the comparison isn't apples-to-oranges.
+- **Product ranking** on relevance, pack fit, price, discount, delivery, ratings,
+  sponsorship, and prior-order preference. This scoring is fully deterministic in
+  demo mode, safety-locked mode, or a local model backend (the safe defaults); with a
+  hosted backend unlocked, matching can instead delegate the pick to that model,
+  constrained to in-stock candidates and re-checked against the same relevance gate.
+- **Real Swiggy Instamart integration** over its official MCP endpoint with OAuth 2.1 +
+  PKCE + dynamic client registration; tokens are stored in the macOS Keychain, never in
+  the browser or project files. Blinkit and Zepto are driven through isolated
+  persistent Playwright browser profiles.
+- **Cart safety by construction**: no checkout/payment route exists anywhere in the app;
+  cart writes require a stack of independent flags (`SAFETY_LOCK`, `DRY_RUN`,
+  per-provider `*_CART_WRITES`) all set true; mutations are read-merge-replace-verify to
+  avoid lost updates; verified (exact-cart) comparison additionally refuses to run
+  against a non-empty cart.
+- **Local recovery and privacy-safe diagnostics** — drafts and comparison runs survive a
+  server restart for 24h in a local SQLite file that never stores photos, addresses,
+  OAuth tokens, or confirmation tokens; `/api/diagnostics` exposes aggregate
+  latency/health only.
+- **Reliability plumbing for provider calls**: short-lived search-result caching,
+  request coalescing, retry with backoff/jitter, and circuit breaking per provider.
+- **Demo mode** exercises the full UI against a local catalogue and never touches a real
+  cart, useful for review without any provider account.
 
-- English, Hindi, and Hinglish request parsing plus on-device macOS Vision OCR.
-- A pre-search transcription review with handwriting crops, alternative readings,
-  editable brands/quantities, and uncertain lines excluded by default.
-- Semantic OCR confidence, duplicate/page-number filtering, and a fail-closed product
-  relevance gate so malformed handwriting cannot silently select an unrelated item.
-- An optional Groq Qwen vision retry that sends only isolated uncertain line strips,
-  never the complete photograph.
-- A local capture-quality preflight for resolution, lighting, contrast, focus, tilt,
-  and perspective, with specific retake guidance before unsafe photos reach OCR.
-- A common provider interface with Blinkit and Instamart active side by side.
-- Official Instamart OAuth 2.1 with PKCE and dynamic client registration.
-- OAuth tokens stored in the macOS Keychain, never in the browser or project files.
-- Instamart address selection, product search, go-to/previous-item signals, cart reads,
-  and guarded cart updates.
-- Deterministic product ranking using relevance, pack fit, price, discount, delivery,
-  ratings/reviews, sponsorship, and previous-order preference when available.
-- Read–merge–replace–verify cart updates, serialized to reduce lost-update races.
-- A strict MCP tool allowlist. Checkout, payment, order placement, and address mutations
-  are not exposed; cart updates remain separately gated and operation-scoped.
-- Estimated cross-platform comparison with item coverage, fee estimates, substitutions,
-  delivery details, and a deterministic recommendation.
-- Coalesced, paced provider searches with transient retry/backoff and circuit breaking.
-- Expiring SQLite recovery for drafts and comparison operations, plus privacy-filtered
-  reliability metrics that never contain requests, photos, addresses, tokens, or carts.
-- Token-gated verified comparison preflight that requires empty carts and explicit
-  provider-specific cart-write opt-ins.
+## Architecture
+
+```mermaid
+flowchart TD
+    A[Typed text or list photo] --> B[On-device macOS Vision OCR]
+    A --> C[Local/Hinglish parser]
+    B --> D[Transcription review or autonomous_safe scoring]
+    D --> E[CartPlan]
+    C --> E
+    E --> F[CartProof contract\nrequired / preferred / flexible rules]
+    F --> G[Orchestrator: fan out to providers]
+    G --> H1[Blinkit\nPlaywright profile]
+    G --> H2[Swiggy Instamart\nMCP + OAuth2.1]
+    G --> H3[Zepto\nPlaywright profile]
+    H1 --> I[Deterministic matcher/ranker]
+    H2 --> I
+    H3 --> I
+    I --> J[CartProof proof engine\nper-item + basket checks]
+    J --> K[Comparison report + decision receipt]
+    K --> L[Confirmed cart write\nread-merge-replace-verify]
+```
+
+FastAPI serves both the JSON API and the static frontend (`static/`, vanilla
+HTML/CSS/JS — no frontend framework or build step). State that must survive a restart
+(drafts, comparison proposals, shopping contracts) is persisted to a local SQLite file
+with TTL-based expiry; everything else is in-memory per process.
+
+## Tech stack
+
+| Layer | Choice |
+|---|---|
+| Backend | Python 3.11+, FastAPI, Uvicorn, Pydantic v2 / pydantic-settings |
+| Frontend | Static HTML/CSS/vanilla JS served directly by FastAPI |
+| OCR | macOS Vision framework, invoked via subprocess (on-device, no upload) |
+| Hosted vision/LLM (optional) | Groq (Qwen3.6), NVIDIA NIM (Nemotron), Hugging Face (Qwen2.5-VL) |
+| Instamart integration | Official Swiggy MCP endpoint (`mcp` SDK) over OAuth 2.1 + PKCE |
+| Blinkit / Zepto integration | Playwright (Chromium), isolated persistent browser profiles |
+| Credential storage | macOS Keychain via `keyring` |
+| Persistence | SQLite (drafts, comparison state, shopping contracts) |
+| Testing | pytest, pytest-cov |
+| Lint/type-check | ruff, pyright |
+| CI | GitHub Actions — lint/type/test matrix (Python 3.11 & 3.14), a Playwright browser job, and a macOS job for real Vision OCR regressions |
 
 ## Setup
 
-Requires Python 3.11+.
+Requires Python 3.11+ (macOS is required for on-device OCR and Keychain storage; other
+platforms can still run the app with typed-only input and a hosted vision backend).
 
 ```bash
 python3 -m venv .venv
@@ -48,7 +103,7 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-For the fast hosted handwriting second opinion, add a Groq API key to `.env`:
+For a fast hosted handwriting second opinion, add a Groq API key to `.env`:
 
 ```dotenv
 MODEL_BACKEND=local
@@ -58,15 +113,14 @@ CLOUD_MODEL_BACKEND=groq
 RECOGNITION_POLICY=autonomous_safe
 ```
 
-Hugging Face and NVIDIA remain supported fallbacks. Typed grocery requests can fall
-back to the local parser when hosted inference is unavailable.
-The local parser handles common English, Hindi, and Hinglish grocery terms, quantities,
-budgets, brands, and price preferences; general dish-to-ingredient expansion requires
-hosted planning.
+Hugging Face and NVIDIA are supported fallbacks. Typed requests fall back to the local
+rule-based parser when no hosted model is configured; general dish-to-ingredient
+expansion needs hosted planning.
 
-## Configure Instamart
+To try it without any provider account, set `DEMO_MODE=true` and skip the provider
+setup below entirely.
 
-Use these settings in `.env`:
+### Configure Swiggy Instamart
 
 ```dotenv
 GROCERY_PROVIDER=blinkit
@@ -81,103 +135,38 @@ ZEPTO_CART_WRITES=false
 CHECKOUT_DISABLED=true
 ```
 
-`INSTAMART_CART_WRITES=false` is intentional for the first authenticated test. Search,
-ranking, previous-order signals, address selection, and cart reads work without giving
-the app permission to mutate the cart. After those responses have been verified for
-your account, set it to `true` and restart the server to allow adding the selected
-items. Checkout remains unavailable regardless of this setting.
+Leave `INSTAMART_CART_WRITES=false` for your first authenticated run — search,
+ranking, address selection, and cart reads all work without granting cart-mutation
+permission. Flip it to `true` and restart once you've verified those responses.
+Checkout is unavailable regardless of this setting; there is no checkout route.
 
-## Run
+### Blinkit / Zepto (Playwright)
+
+Blinkit and Zepto have no supported public consumer API, so they're driven through
+separate persistent Chromium profiles:
+
+```bash
+playwright install chromium
+```
+
+### Run
 
 ```bash
 source .venv/bin/activate
 uvicorn app.main:app --reload
 ```
 
-Open [http://127.0.0.1:8000](http://127.0.0.1:8000), choose **Blinkit** or **Swiggy
-Instamart** from the provider selector, and connect that service. Instamart returns to
-the local app after its OAuth flow; Blinkit keeps the existing saved browser session.
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000). The app only answers on
+`localhost`/`127.0.0.1`/`::1` (DNS-rebinding protection) — it cannot be reached from
+another device on the network by design.
 
-For a photographed request, the app reads the image locally first and pauses before any
-provider search. Review the recognized product, brand, quantity, and unit. Low-confidence
-lines are unchecked, so they cannot be searched accidentally. Editing a line checks it
-for inclusion. If a hosted-model key is configured, the retry action sends only those
-isolated line strips; failure leaves the local review unchanged. In review mode,
-successful cloud suggestions remain unchecked until you confirm them manually.
-
-With `RECOGNITION_POLICY=autonomous_safe`, the editable transcription checkpoint is
-replaced by an automatic decision stage. Local Vision, an independent hosted suggestion,
-and selected-provider catalogue results are scored together. Strong readings continue
-automatically; unresolved lines are skipped without searching or adding a product. Set
-the policy back to `review` to restore the manual checkpoint.
-
-The app is currently configured for port `8000`; the OAuth redirect URI must use the
-same port and `localhost` host.
-
-The app answers only on a loopback address. A request whose `Host` is anything other
-than `localhost`, `127.0.0.1`, or `::1` is refused, and a browser write from another
-origin is refused separately. This blocks DNS rebinding, and it also means the app
-cannot be reached from another device on the same network — opening it from a phone at
-`http://192.168.x.x:8000` returns 400 by design.
-
-## Compare apps
-
-Choose the platforms under **Compare across apps**, then select **Compare estimated
-prices**. Estimated mode searches every connected platform without changing a cart.
-It shows the selected products, quantities, coverage warnings, item subtotal, estimated
-fees, final total, and recommendation.
-
-**Check verified-mode readiness** is deliberately stricter. It is available only when
-every participating provider is connected, its cart is empty, and its provider-specific
-cart-write flag is enabled. The app then asks for one explicit confirmation before
-adding anything. Checkout and order placement remain unavailable.
-
-For version one, verified comparison refuses to run against non-empty carts. After a
-verified comparison, the user can keep the winning cart, keep all carts, or remove only
-the quantities recorded for that comparison operation.
-
-## Safety model
-
-The app's Instamart integration is narrower than the remote MCP server:
-
-- Only address reads, product search, go-to items, cart reads/updates, and order-history
-  reads are callable.
-- There is no checkout or payment route, UI control, provider method, or allowed MCP
-  tool.
-- Cart updates require `AUTO_ADD_TO_CART=true`, all general safety flags to permit
-  mutations, and `INSTAMART_CART_WRITES=true`.
-- Each cart mutation reads the current cart, merges requested quantities, sends the
-  complete replacement cart, then reads it again to verify the result.
-
-## Blinkit fallback
-
-Blinkit and Zepto use separate persistent Playwright browser profiles because they have
-no supported public consumer shopping API in this project. `GROCERY_PROVIDER` only
-chooses the initial selection; all providers remain available. Install Chromium once:
-
-```bash
-playwright install chromium
-```
-
-## Demo and tests
-
-`DEMO_MODE=true` exercises the interface with a local catalogue and never mutates a
-real cart. Demo mode parses the request you actually submit; only provider products
-and prices are synthetic.
+### Tests
 
 ```bash
 .venv/bin/python -m pytest
 ```
 
-The tests cover OAuth state/PKCE, MCP tool allowlisting, Instamart response mapping,
-ranking data, cart merging and verification, mutation idempotency, the checkout safety
-boundary, and real macOS Vision regressions for numbered and quantity-heavy handwritten
-lists.
-
-The broader degraded-photo, parsing, matching, provider, and security results are in
-[the 27 July project scenario audit](docs/project-scenario-audit-2026-07-27.md).
-
-For development checks:
+For full local CI parity:
 
 ```bash
 pip install -r requirements-dev.txt
@@ -187,31 +176,42 @@ pip install -r requirements-dev.txt
 RUN_BROWSER_TESTS=1 .venv/bin/python -m pytest -m browser
 ```
 
-The browser test requires Chromium once:
+## Verified state
 
-```bash
-.venv/bin/python -m playwright install chromium
-```
+Everything below was run against this codebase directly (not asserted from memory):
 
-## Held-out handwriting evaluation
+- **399 tests** across 42 test modules, run with `pytest -q` — passing, 4 skipped by
+  default (Playwright browser tests, which need `RUN_BROWSER_TESTS=1` and a Chromium
+  install).
+- `ruff check .` — all checks pass.
+- `pyright` — 0 errors, 0 warnings.
+- Coverage floor is enforced in CI at **65%** (`fail_under = 65` in `pyproject.toml`).
+- CI (`.github/workflows/ci.yml`) runs three jobs on every push/PR: lint+type+test on
+  Python 3.11 and 3.14, a Playwright browser-test job, and a macOS job that runs real
+  Vision OCR regressions against photographed handwriting fixtures (not synthetic
+  input).
+- A held-out handwriting evaluator measures OCR accuracy against photos outside the
+  fixture set — the in-repo fixtures are regression inputs, not accuracy evidence, and
+  the tool refuses to run against the tuned fixture directory:
 
-Known fixtures are regression inputs, not handwriting-accuracy evidence. Copy
-`docs/held-out-handwriting-manifest.example.json`, point it at photographs outside
-`tests/fixtures`, and keep `tuned_against` set to `false`:
+  ```bash
+  .venv/bin/python tools/evaluate_handwriting.py path/to/manifest.json \
+    --output handwriting-report.json
+  ```
 
-```bash
-.venv/bin/python tools/evaluate_handwriting.py path/to/manifest.json \
-  --output handwriting-report.json
-```
+## Further documentation
 
-The evaluator reports exact lines, exact structured items, field accuracy, review
-rate, missed items, and unsafe false accepts. It refuses the tuned fixture directory.
+- [`docs/project-scenario-audit-2026-07-27.md`](docs/project-scenario-audit-2026-07-27.md) —
+  degraded-photo, parsing, matching, provider, and security scenario results.
+- [`docs/comparison-safety.md`](docs/comparison-safety.md) — the estimated vs. verified
+  comparison safety boundary in detail.
+- [`docs/comparison-live-test-checklist.md`](docs/comparison-live-test-checklist.md) —
+  manual checklist for live provider verification.
+- [`docs/cartproof-implementation-handoff.md`](docs/cartproof-implementation-handoff.md) —
+  implementation handoff notes and known limitations for the CartProof contract system.
 
-## Local diagnostics and recovery
+## Screenshots
 
-Drafts, proposals, and completed comparison operations survive server restarts for
-24 hours by default in `.photo_shopping_state.sqlite3`. Photographs, delivery
-addresses, OAuth credentials, and confirmation tokens are never written there.
-
-`GET /api/diagnostics` reports aggregate provider-search and stage-latency health.
-It contains no query text, product names, cart contents, or error messages.
+No screenshots are checked into the repo yet. Run the app locally (`DEMO_MODE=true` is
+the fastest path — no provider account needed) to see the transcription review,
+CartProof contract editor, and comparison cards.

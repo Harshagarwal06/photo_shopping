@@ -5,12 +5,13 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, computed_field, field_validator
+from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
 PROVIDER_QUERY_BRANDS = (
     "aashirvaad", "amul", "britannia", "cadbury", "colgate", "daawat", "fortune",
-    "havmor", "kelloggs", "kitkat", "knorr", "kurkure", "maggi", "mother dairy",
-    "oreo", "pintola", "real", "rin", "tata",
+    "havmor", "id", "kelloggs", "kitkat", "knorr", "kurkure", "lays", "maggi",
+    "manforce", "modern", "mother dairy", "nescafe", "nestle", "odomos", "oreo",
+    "pintola", "real", "rin", "tata", "tide", "veeba",
 )
 
 
@@ -88,6 +89,73 @@ class CartPlan(BaseModel):
     items: list[PlannedItem] = Field(min_length=1)
     constraints: CartConstraints = Field(default_factory=CartConstraints)
     processing_note: str = ""
+
+
+class RequirementLevel(StrEnum):
+    REQUIRED = "required"
+    PREFERRED = "preferred"
+    FLEXIBLE = "flexible"
+
+
+class SubstitutionPolicy(StrEnum):
+    NONE = "none"
+    SAME_BRAND = "same_brand"
+    EQUIVALENT = "equivalent"
+    ANY = "any"
+
+
+class ItemContract(BaseModel):
+    planned_item_id: str = Field(min_length=1)
+    product_name: str = Field(min_length=1)
+    quantity: float = Field(gt=0)
+    unit: str = Field(min_length=1)
+    quantity_level: RequirementLevel = RequirementLevel.REQUIRED
+    brand: str | None = None
+    brand_level: RequirementLevel = RequirementLevel.FLEXIBLE
+    substitution_policy: SubstitutionPolicy = SubstitutionPolicy.ANY
+    min_fill_ratio: float = Field(default=0.9, gt=0)
+    max_fill_ratio: float = Field(default=1.1, ge=1)
+    item_price_cap: float | None = Field(default=None, gt=0)
+
+    @field_validator("product_name", "unit", mode="before")
+    @classmethod
+    def clean_contract_strings(cls, value: Any) -> str:
+        return str(value or "").strip()
+
+    @field_validator("brand", mode="before")
+    @classmethod
+    def clean_optional_brand(cls, value: Any) -> str | None:
+        cleaned = str(value or "").strip()
+        return cleaned or None
+
+    @model_validator(mode="after")
+    def validate_contract_rules(self) -> ItemContract:
+        if self.max_fill_ratio < self.min_fill_ratio:
+            raise ValueError("Maximum quantity tolerance cannot be below the minimum.")
+        if (
+            self.brand_level == RequirementLevel.REQUIRED
+            or self.substitution_policy
+            in {SubstitutionPolicy.NONE, SubstitutionPolicy.SAME_BRAND}
+        ) and not self.brand:
+            raise ValueError(
+                "A brand is required for a required-brand or same-brand rule."
+            )
+        return self
+
+
+class ShoppingContract(BaseModel):
+    id: str = Field(default_factory=lambda: uuid4().hex)
+    version: int = Field(default=1, ge=1)
+    items: list[ItemContract] = Field(min_length=1)
+    cart_budget: float | None = Field(default=None, gt=0)
+    status: Literal["draft", "confirmed"] = "draft"
+    fingerprint: str = ""
+
+
+class ContractConfirmRequest(BaseModel):
+    version: int = Field(ge=1)
+    items: list[ItemContract] = Field(min_length=1)
+    cart_budget: float | None = Field(default=None, gt=0)
 
 
 class ImageQualityReport(BaseModel):
@@ -230,6 +298,41 @@ class Substitution(BaseModel):
     per_unit_delta: float | None = None
 
 
+class RequirementCheck(BaseModel):
+    rule: Literal[
+        "availability",
+        "relevance",
+        "brand",
+        "quantity",
+        "item_price_cap",
+        "cart_budget",
+        "cart_total",
+    ]
+    requested: str
+    supplied: str
+    status: Literal["pass", "warning", "fail", "unverified"]
+    explanation: str
+
+
+class ItemProof(BaseModel):
+    planned_item_id: str
+    requested_item: str
+    product_id: str | None = None
+    product_name: str | None = None
+    checks: list[RequirementCheck] = Field(default_factory=list)
+    status: Literal["pass", "warning", "fail"] = "pass"
+
+
+class PlatformProof(BaseModel):
+    provider: str
+    status: Literal["compliant", "qualified", "non_compliant"] = "compliant"
+    eligible: bool = True
+    required_failures: int = 0
+    preference_misses: int = 0
+    item_proofs: list[ItemProof] = Field(default_factory=list)
+    basket_checks: list[RequirementCheck] = Field(default_factory=list)
+
+
 class PlatformOutcome(BaseModel):
     provider: str
     display_name: str
@@ -241,6 +344,7 @@ class PlatformOutcome(BaseModel):
     missing_items: list[str] = Field(default_factory=list)
     unverified_items: list[str] = Field(default_factory=list)
     substitutions: list[Substitution] = Field(default_factory=list)
+    proof: PlatformProof | None = None
 
     @property
     def coverage_tier(self) -> int:
@@ -259,6 +363,9 @@ class ComparisonReport(BaseModel):
     ranking: list[str] = Field(default_factory=list)
     reasons: list[str] = Field(default_factory=list)
     estimated: bool = False
+    contract_id: str | None = None
+    contract_version: int | None = None
+    contract_fingerprint: str = ""
 
 
 class ProviderCapabilities(BaseModel):
@@ -295,6 +402,7 @@ class ComparisonProposal(BaseModel):
     report: ComparisonReport
     provider_ids: list[str] = Field(default_factory=list)
     drafts: dict[str, DraftCart] = Field(default_factory=dict)
+    contract: ShoppingContract | None = None
     frozen: bool = False
 
 
@@ -341,6 +449,18 @@ class ComparisonOperation(BaseModel):
     ] = "completed"
     winner: str | None = None
     cleanup: list[CleanupOutcome] = Field(default_factory=list)
+
+
+class DecisionReceipt(BaseModel):
+    comparison_id: str
+    comparison_kind: Literal["proposal", "operation"]
+    contract_id: str
+    contract_version: int
+    contract_fingerprint: str
+    winner: str | None = None
+    estimated: bool = False
+    platforms: list[PlatformOutcome] = Field(default_factory=list)
+    reasons: list[str] = Field(default_factory=list)
 
 
 class ConfirmResponse(BaseModel):

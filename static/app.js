@@ -14,6 +14,7 @@ const state = {
   lastTotal: 0,
   comparisonProposal: null,
   comparisonOperation: null,
+  contract: null,
   plan: null,
   pendingAction: "draft",
   cloudRetryAvailable: false,
@@ -53,8 +54,14 @@ const ui = {
   transcriptionItems: document.querySelector("#transcription-items"),
   transcriptionNotice: document.querySelector("#transcription-notice"),
   transcriptionSummary: document.querySelector("#transcription-summary"),
+  addTranscriptionItem: document.querySelector("#add-transcription-item"),
   cloudRetry: document.querySelector("#cloud-retry"),
   continueReviewed: document.querySelector("#continue-reviewed"),
+  contract: document.querySelector("#cartproof-contract"),
+  contractItems: document.querySelector("#cartproof-contract-items"),
+  contractBudget: document.querySelector("#cartproof-cart-budget"),
+  contractNote: document.querySelector("#cartproof-contract-note"),
+  confirmContract: document.querySelector("#confirm-cartproof-contract"),
   review: document.querySelector("#review"),
   reviewTitle: document.querySelector("#review-title"),
   reviewSummary: document.querySelector("#review-summary"),
@@ -394,7 +401,7 @@ function transcriptionRowMarkup(item) {
   return `
     <article class="transcription-row${warning ? " is-review" : ""}" data-plan-item="${escapeHtml(item.id)}">
       <label class="transcription-include">
-        <input type="checkbox" data-field="include" ${warning && !item.confirmed ? "" : "checked"} />
+        <input type="checkbox" data-field="include" ${item.confirmed ? "checked" : ""} />
         <span>Include</span>
       </label>
       <div class="transcription-field">
@@ -466,6 +473,49 @@ function renderTranscription() {
   ui.transcription.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
+function syncTranscriptionEdits() {
+  if (!state.plan) return;
+  for (const row of ui.transcriptionItems.querySelectorAll("[data-plan-item]")) {
+    const item = state.plan.items.find(
+      (candidate) => candidate.id === row.dataset.planItem,
+    );
+    if (!item) continue;
+    const included = row.querySelector('[data-field="include"]').checked;
+    item.search_term = row.querySelector('[data-field="search_term"]').value;
+    item.context = row.querySelector('[data-field="context"]').value;
+    item.quantity = row.querySelector('[data-field="quantity"]').value;
+    item.unit = row.querySelector('[data-field="unit"]').value;
+    item.confirmed = included;
+    if (included) item.needs_review = false;
+  }
+}
+
+function addMissingTranscriptionItem() {
+  if (!state.plan) return;
+  syncTranscriptionEdits();
+  const id = `manual-${globalThis.crypto?.randomUUID?.() ?? Date.now()}`;
+  state.plan.items.push({
+    id,
+    search_term: "",
+    context: "",
+    quantity: 1,
+    unit: "item",
+    raw_text: "Added manually",
+    source: "text",
+    confidence: 1,
+    needs_review: false,
+    confirmed: true,
+    alternatives: [],
+    crop_box: [],
+    recognition_notes: [],
+  });
+  renderTranscription();
+  const row = ui.transcriptionItems.querySelector(
+    `[data-plan-item="${CSS.escape(id)}"]`,
+  );
+  row?.querySelector('[data-field="search_term"]')?.focus();
+}
+
 function reviewedPlanFromForm() {
   if (!state.plan) return null;
   const items = [];
@@ -489,6 +539,183 @@ function reviewedPlanFromForm() {
   }
   if (!items.length) throw new Error("Include at least one reviewed grocery item.");
   return { ...state.plan, items };
+}
+
+function contractLevelOptions(selected) {
+  return [
+    ["required", "Required"],
+    ["preferred", "Preferred"],
+    ["flexible", "Flexible"],
+  ].map(([value, label]) =>
+    `<option value="${value}" ${value === selected ? "selected" : ""}>${label}</option>`
+  ).join("");
+}
+
+function contractPolicyOptions(selected) {
+  return [
+    ["none", "No substitution"],
+    ["same_brand", "Same brand"],
+    ["equivalent", "Equivalent product"],
+    ["any", "Any reasonable match"],
+  ].map(([value, label]) =>
+    `<option value="${value}" ${value === selected ? "selected" : ""}>${label}</option>`
+  ).join("");
+}
+
+function contractItemMarkup(item) {
+  return `
+    <article class="contract-item" data-contract-item="${escapeHtml(item.planned_item_id)}">
+      <div class="contract-item-copy">
+        <strong>${escapeHtml(item.product_name)}</strong>
+        <small>${escapeHtml(`${item.quantity} ${item.unit}`)} requested</small>
+      </div>
+      <label class="contract-field">
+        <span>Quantity rule</span>
+        <select data-contract-field="quantity_level">
+          ${contractLevelOptions(item.quantity_level)}
+        </select>
+      </label>
+      <label class="contract-field">
+        <span>Brand</span>
+        <input data-contract-field="brand" value="${escapeHtml(item.brand || "")}" placeholder="Any brand" />
+      </label>
+      <label class="contract-field">
+        <span>Brand rule</span>
+        <select data-contract-field="brand_level">
+          ${contractLevelOptions(item.brand_level)}
+        </select>
+      </label>
+      <div class="contract-tolerance">
+        <label class="contract-field">
+          <span>Substitutions</span>
+          <select data-contract-field="substitution_policy">
+            ${contractPolicyOptions(item.substitution_policy)}
+          </select>
+        </label>
+        <label class="contract-field">
+          <span>Minimum quantity supplied (%)</span>
+          <input data-contract-field="min_fill_ratio" type="number" min="1" max="500" step="1" value="${escapeHtml(Math.round(item.min_fill_ratio * 100))}" />
+        </label>
+        <label class="contract-field">
+          <span>Maximum quantity supplied (%)</span>
+          <input data-contract-field="max_fill_ratio" type="number" min="100" max="1000" step="1" value="${escapeHtml(Math.round(item.max_fill_ratio * 100))}" />
+        </label>
+        <label class="contract-field">
+          <span>Maximum line price (optional)</span>
+          <input data-contract-field="item_price_cap" type="number" min="1" step="1" inputmode="decimal" value="${escapeHtml(item.item_price_cap ?? "")}" placeholder="No item cap" />
+        </label>
+      </div>
+    </article>`;
+}
+
+function renderContract() {
+  if (!state.contract) return;
+  ui.contractItems.innerHTML = state.contract.items.map(contractItemMarkup).join("");
+  ui.contractBudget.value = state.contract.cart_budget ?? "";
+  ui.contractNote.textContent =
+    `Contract v${state.contract.version} is a draft. Confirm it before any provider search.`;
+  ui.transcription.hidden = true;
+  ui.progress.hidden = true;
+  ui.contract.hidden = false;
+  ui.contract.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function beginCartProof(plan) {
+  state.plan = plan;
+  ui.contract.hidden = true;
+  ui.progress.hidden = false;
+  ui.progressMessage.textContent = "Preparing one contract for every selected app…";
+  setStage("planner");
+  try {
+    const response = await fetch("/api/contracts/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(plan),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || "The shopping contract could not be created.");
+    state.contract = payload;
+    renderContract();
+    return true;
+  } catch (error) {
+    ui.progressMessage.textContent = error.message;
+    showToast(error.message, { tone: "error", sticky: true });
+    return false;
+  }
+}
+
+function contractConfirmationPayload() {
+  if (!state.contract) throw new Error("Create a shopping contract first.");
+  const items = state.contract.items.map((item) => {
+    const row = ui.contractItems.querySelector(
+      `[data-contract-item="${CSS.escape(item.planned_item_id)}"]`,
+    );
+    const numberValue = (field) => {
+      const raw = row.querySelector(`[data-contract-field="${field}"]`).value.trim();
+      return raw ? Number(raw) : null;
+    };
+    const minPercent = numberValue("min_fill_ratio");
+    const maxPercent = numberValue("max_fill_ratio");
+    if (
+      !Number.isFinite(minPercent)
+      || !Number.isFinite(maxPercent)
+      || minPercent <= 0
+      || maxPercent < minPercent
+    ) {
+      throw new Error(`Check the quantity tolerance for ${item.product_name}.`);
+    }
+    const cap = numberValue("item_price_cap");
+    if (cap != null && (!Number.isFinite(cap) || cap <= 0)) {
+      throw new Error(`Check the price cap for ${item.product_name}.`);
+    }
+    return {
+      ...item,
+      quantity_level: row.querySelector('[data-contract-field="quantity_level"]').value,
+      brand: row.querySelector('[data-contract-field="brand"]').value.trim() || null,
+      brand_level: row.querySelector('[data-contract-field="brand_level"]').value,
+      substitution_policy: row.querySelector('[data-contract-field="substitution_policy"]').value,
+      min_fill_ratio: minPercent / 100,
+      max_fill_ratio: maxPercent / 100,
+      item_price_cap: cap,
+    };
+  });
+  const budgetRaw = ui.contractBudget.value.trim();
+  const budget = budgetRaw ? Number(budgetRaw) : null;
+  if (budget != null && (!Number.isFinite(budget) || budget <= 0)) {
+    throw new Error("The final cart budget must be a positive amount.");
+  }
+  return {
+    version: state.contract.version,
+    items,
+    cart_budget: budget,
+  };
+}
+
+async function confirmCartProofContract() {
+  if (!state.contract || !state.plan) return;
+  setButtonState(ui.confirmContract, "loading");
+  try {
+    const response = await fetch(
+      `/api/contracts/${encodeURIComponent(state.contract.id)}/confirm`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(contractConfirmationPayload()),
+      },
+    );
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || "The shopping contract could not be confirmed.");
+    state.contract = payload;
+    ui.contractNote.textContent =
+      `Contract v${payload.version} confirmed · ${payload.fingerprint.slice(0, 12)}. Checking every cart now.`;
+    const succeeded = await runComparison(state.plan, payload);
+    if (!succeeded) throw new Error("The confirmed contract could not be compared.");
+    setButtonState(ui.confirmContract, "success");
+  } catch (error) {
+    setButtonState(ui.confirmContract, "error");
+    showToast(error.message, { tone: "error", sticky: true });
+    window.setTimeout(() => setButtonState(ui.confirmContract), 1800);
+  }
 }
 
 async function previewRequest(action, { useCloud = false } = {}) {
@@ -518,6 +745,7 @@ async function previewRequest(action, { useCloud = false } = {}) {
   setButtonState(button, "loading");
   ui.progress.hidden = false;
   ui.review.hidden = true;
+  ui.contract.hidden = true;
   ui.comparison.hidden = true;
   ui.confirmBar.hidden = true;
   ui.progressMessage.textContent = useCloud
@@ -546,7 +774,7 @@ async function previewRequest(action, { useCloud = false } = {}) {
         throw new Error(`Connect ${state.providerName} before searching the list.`);
       }
       const succeeded = action === "compare"
-        ? await runComparison(payload)
+        ? await beginCartProof(payload)
         : await streamDraft(payload);
       if (!succeeded) return;
       return;
@@ -579,6 +807,51 @@ function friendlyComparisonReason(reason) {
   return cleanReason
     .replaceAll("Verified-mode", "Exact-total")
     .replaceAll("verified-mode", "exact-total");
+}
+
+function proofCheckMarkup(check) {
+  const label = check.status === "pass"
+    ? "Pass"
+    : check.status === "warning"
+      ? "Review"
+      : check.status === "unverified"
+        ? "Unverified"
+        : "Fail";
+  const dotClass = check.status === "pass"
+    ? "is-pass"
+    : check.status === "warning"
+      ? "is-warning"
+      : "is-fail";
+  return `
+    <li>
+      <strong class="proof-status"><i class="proof-dot ${dotClass}"></i>${label}</strong>
+      <span>${escapeHtml(check.explanation)}</span>
+    </li>`;
+}
+
+function platformProofMarkup(proof) {
+  if (!proof) return "";
+  const label = proof.status === "compliant"
+    ? "All confirmed requirements pass"
+    : proof.status === "qualified"
+      ? `${proof.preference_misses} preferred choice${proof.preference_misses === 1 ? "" : "s"} changed`
+      : `${proof.required_failures} required check${proof.required_failures === 1 ? "" : "s"} did not pass`;
+  const itemProofs = proof.item_proofs.map((item) => `
+    <details class="proof-item">
+      <summary>${escapeHtml(item.requested_item)} · ${escapeHtml(item.status)}</summary>
+      <ul class="proof-checks">${item.checks.map(proofCheckMarkup).join("")}</ul>
+    </details>`).join("");
+  const basket = proof.basket_checks.length
+    ? `<details class="proof-item">
+        <summary>Cart total · ${proof.basket_checks.some((check) => check.status !== "pass") ? "check" : "pass"}</summary>
+        <ul class="proof-checks">${proof.basket_checks.map(proofCheckMarkup).join("")}</ul>
+      </details>`
+    : "";
+  return `
+    <section class="proof-summary is-${escapeHtml(proof.status)}">
+      <strong>CartProof: ${escapeHtml(label)}</strong>
+      <div class="proof-items">${itemProofs}${basket}</div>
+    </section>`;
 }
 
 function comparisonOutcomeMarkup(outcome, winner) {
@@ -675,13 +948,14 @@ function comparisonOutcomeMarkup(outcome, winner) {
   return `
     <article class="platform-outcome${outcome.provider === winner ? " is-winner" : ""}">
       <header>
-        <span class="comparison-status">${outcome.provider === winner ? "Lowest total" : "Compared"}</span>
+        <span class="comparison-status">${outcome.provider === winner ? "CartProof choice" : "Compared"}</span>
         <h3>${escapeHtml(outcome.display_name)}</h3>
         <span class="comparison-coverage">${escapeHtml(coverage)}</span>
         ${summary.estimated ? '<span class="comparison-estimate">Estimated total</span>' : '<span class="comparison-status">Exact cart total</span>'}
       </header>
       <ul class="comparison-lines">${itemLines + unmatchedLines || "<li><span>No matched products</span><span>—</span></li>"}</ul>
       ${warnings.length ? `<div class="coverage-warnings">${warnings.map((warning) => `<p>${escapeHtml(warning)}</p>`).join("")}</div>` : ""}
+      ${platformProofMarkup(outcome.proof)}
       <ul class="bill-lines">
         <li><span>Item subtotal</span><span>${money.format(summary.subtotal)}</span></li>
         ${feeLines}
@@ -698,11 +972,13 @@ function renderComparison(report) {
   const winner = report.winner;
   const winnerOutcome = report.platforms.find((outcome) => outcome.provider === winner);
   ui.comparisonWinner.innerHTML = winnerOutcome
-    ? `<span>${report.estimated ? "Lowest estimated total" : "Lowest exact total"}</span><strong>${escapeHtml(winnerOutcome.display_name)}</strong><span>${money.format(winnerOutcome.summary.total)}</span>`
-    : "";
+    ? `<span>CartProof recommendation</span><strong>${escapeHtml(winnerOutcome.display_name)}</strong><span>${money.format(winnerOutcome.summary.total)}</span>`
+    : `<span>CartProof result</span><strong>No compliant cart</strong><span>Review required</span>`;
   ui.comparisonSummary.textContent = report.estimated
-    ? "These totals combine live product prices with estimated fees. No cart was changed."
-    : "These totals were read from the shopping-app carts, including the fees shown there.";
+    ? state.demoMode
+      ? `Contract v${report.contract_version ?? 1} checked against local demo catalogues and estimated fees. No cart was changed.`
+      : `Contract v${report.contract_version ?? 1} checked against live product prices and estimated fees. No cart was changed.`
+    : `Contract v${report.contract_version ?? 1} checked against exact shopping-app cart totals and disclosed fees.`;
   ui.comparisonEditHelp.hidden = !report.estimated;
   ui.comparisonReasons.innerHTML = (report.reasons ?? [])
     .map((reason) => `<p>${escapeHtml(friendlyComparisonReason(reason))}</p>`)
@@ -712,6 +988,7 @@ function renderComparison(report) {
   ui.comparisonGrid.innerHTML = report.platforms
     .map((outcome) => comparisonOutcomeMarkup(outcome, winner))
     .join("");
+  ui.progress.hidden = true;
   ui.comparison.hidden = false;
   ui.comparisonDecision.hidden = !state.comparisonOperation;
   ui.comparison.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -742,7 +1019,7 @@ async function overrideComparisonSelection(providerId, itemId, productId, units)
   }
 }
 
-async function runComparison(plan) {
+async function runComparison(plan, contract = state.contract) {
   const providerIds = selectedComparisonProviders();
   if (!providerIds.length) {
     showToast("Choose at least one app to compare.", { tone: "error" });
@@ -752,6 +1029,7 @@ async function runComparison(plan) {
   showRequestError("");
   setButtonState(ui.compareButton, "loading");
   ui.progress.hidden = false;
+  ui.contract.hidden = true;
   ui.review.hidden = true;
   ui.confirmBar.hidden = true;
   ui.comparison.hidden = true;
@@ -761,6 +1039,7 @@ async function runComparison(plan) {
   const formData = new FormData();
   formData.append("plan_json", JSON.stringify(plan));
   formData.append("provider_ids", providerIds.join(","));
+  if (contract?.id) formData.append("contract_id", contract.id);
 
   try {
     const response = await fetch("/api/comparisons/estimate", {
@@ -1022,7 +1301,7 @@ async function continueReviewedPlan() {
     }
     setButtonState(ui.continueReviewed, "loading");
     const succeeded = state.pendingAction === "compare"
-      ? await runComparison(plan)
+      ? await beginCartProof(plan)
       : await streamDraft(plan);
     if (!succeeded) {
       setButtonState(ui.continueReviewed, "error");
@@ -1044,7 +1323,9 @@ ui.image.addEventListener("change", async () => {
   ui.uploadBox.classList.toggle("is-success", Boolean(file));
   ui.uploadBox.classList.remove("is-error");
   state.plan = null;
+  state.contract = null;
   ui.transcription.hidden = true;
+  ui.contract.hidden = true;
   state.photoQualityController?.abort();
   state.photoQuality = null;
   ui.photoQuality.hidden = true;
@@ -1091,7 +1372,9 @@ ui.compareButton.addEventListener("click", () => previewRequest("compare"));
 ui.cloudRetry.addEventListener("click", () =>
   previewRequest(state.pendingAction, { useCloud: true })
 );
+ui.addTranscriptionItem.addEventListener("click", addMissingTranscriptionItem);
 ui.continueReviewed.addEventListener("click", continueReviewedPlan);
+ui.confirmContract.addEventListener("click", confirmCartProofContract);
 ui.transcriptionItems.addEventListener("input", (event) => {
   const row = event.target.closest("[data-plan-item]");
   if (!row || event.target.matches('[data-field="include"]')) return;
@@ -1196,12 +1479,14 @@ function clearDraftForProviderChange() {
   state.draft = null;
   state.comparisonProposal = null;
   state.comparisonOperation = null;
+  state.contract = null;
   state.providerReady = false;
   state.providerStatusMessage = "";
   state.lastTotal = 0;
   ui.progress.hidden = true;
   ui.review.hidden = true;
   ui.transcription.hidden = true;
+  ui.contract.hidden = true;
   ui.confirmBar.hidden = true;
   ui.comparison.hidden = true;
   ui.groups.replaceChildren();
