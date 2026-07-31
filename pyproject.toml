@@ -1,6 +1,7 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+pythonpath = ["."]
 markers = [
     "browser: end-to-end tests that require an installed Chromium browser",
 ]
