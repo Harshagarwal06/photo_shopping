@@ -180,16 +180,21 @@ RUN_BROWSER_TESTS=1 .venv/bin/python -m pytest -m browser
 
 Everything below was run against this codebase directly (not asserted from memory):
 
-- **399 tests** across 42 test modules, run with `pytest -q` — passing, 4 skipped by
-  default (Playwright browser tests, which need `RUN_BROWSER_TESTS=1` and a Chromium
-  install).
+- **399 tests** across 42 test modules: `395 passed, 4 skipped` on `pytest`. The skips
+  are the Playwright browser tests, which need `RUN_BROWSER_TESTS=1` and an installed
+  Chromium.
+- **73% line coverage** (`pytest --cov=app`), against a **65%** floor enforced in CI
+  (`fail_under = 65` in `pyproject.toml`).
 - `ruff check .` — all checks pass.
 - `pyright` — 0 errors, 0 warnings.
-- Coverage floor is enforced in CI at **65%** (`fail_under = 65` in `pyproject.toml`).
-- CI (`.github/workflows/ci.yml`) runs three jobs on every push/PR: lint+type+test on
-  Python 3.11 and 3.14, a Playwright browser-test job, and a macOS job that runs real
-  Vision OCR regressions against photographed handwriting fixtures (not synthetic
-  input).
+- CI (`.github/workflows/ci.yml`) gates every push/PR on three jobs: lint + type-check +
+  tests on Python 3.11 and 3.14, and a Playwright browser-smoke job.
+- A fourth job runs the real macOS Vision OCR regressions against photographed
+  handwriting, but **reports without gating** (`continue-on-error`). Apple changes the
+  Vision engine between macOS releases — including point releases — and GitHub publishes
+  only major-version runner labels, so exact-output assertions cannot be pinned and
+  would drift red on each image bump. The same suite passes in full on a macOS 15.6.1
+  dev machine. Treat on-device OCR accuracy as verified locally, not by CI.
 - A held-out handwriting evaluator measures OCR accuracy against photos outside the
   fixture set — the in-repo fixtures are regression inputs, not accuracy evidence, and
   the tool refuses to run against the tuned fixture directory:
