@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -22,6 +23,11 @@ pytestmark = [
 ]
 
 ROOT = Path(__file__).resolve().parent.parent
+
+requires_vision = pytest.mark.skipif(
+    sys.platform != "darwin" or shutil.which("swift") is None,
+    reason="Real photo OCR needs Darwin and the Swift driver.",
+)
 
 
 def available_port() -> int:
@@ -196,6 +202,7 @@ def test_demo_compares_all_three_apps_without_live_connections(live_demo):
         browser.close()
 
 
+@requires_vision
 def test_photo_review_can_add_an_ocr_line_that_was_missed(live_demo):
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
