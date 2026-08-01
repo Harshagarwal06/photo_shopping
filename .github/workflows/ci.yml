@@ -39,7 +39,13 @@ jobs:
       - run: RUN_BROWSER_TESTS=1 pytest -m browser tests/test_browser_smoke.py
 
   macos-vision:
-    runs-on: macos-latest
+    # Pinned, not macos-latest. These tests assert near-exact output from
+    # Apple's on-device Vision OCR, whose recognition changes between macOS
+    # releases: on macOS 26 the same fixture reads "bread" as "bread cone loaf"
+    # and several degraded-photo variants fall under their accuracy floors.
+    # The fixtures and floors are tuned against macOS 15, so pin to it. Revisit
+    # when GitHub deprecates this image (it keeps only two GA macOS images).
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
